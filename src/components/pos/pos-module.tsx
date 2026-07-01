@@ -241,11 +241,10 @@ export default function POSModule({ state }: POSModuleProps) {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 h-full overflow-hidden">
-      <div className="md:col-span-1 flex flex-col overflow-hidden bg-primary border-l border-r border-black">
-        <ProductSearch state={state} onAdd={state.addToCart} />
-      </div>
-
-      <div className="md:col-span-2 flex flex-col overflow-hidden bg-white">
+      <div className="md:col-span-3 flex flex-col overflow-hidden bg-white">
+        <div className="p-4 bg-gray-100">
+          <ProductSearch state={state} onAdd={state.addToCart} />
+        </div>
         <CartPanel 
           cart={state.cart} 
           onUpdateQty={state.updateCartQty} 

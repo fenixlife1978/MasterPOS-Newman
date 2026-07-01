@@ -10,6 +10,7 @@ import Sidebar from '@/components/layout/sidebar';
 import Topbar from '@/components/layout/topbar';
 import POSModule from '@/components/pos/pos-module';
 import ClientsModule from '@/components/customers/clients-module';
+import ClientCreditModal from '@/components/customers/ClientCreditModal';
 import AccountsModule from '@/components/accounts/accounts-module';
 import CashModule from '@/components/register/cash-module';
 import AdminDashboard from '@/components/dashboard/AdminDashboard';
@@ -30,9 +31,8 @@ export default function LicoPOSApp() {
   const [terminalBlocked, setTerminalBlocked] = useState(false);
   const [checkingBlock, setCheckingBlock] = useState(true);
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [searchTerm, setSearchTerm] = useState(''); // ✅ Agregado para useBarcode
+  const [showClientCreditModal, setShowClientCreditModal] = useState(false);
 
-  // Cargar datos a caché local SOLO una vez cuando el usuario está autenticado
   useEffect(() => {
     if (user && !authLoading && !dataLoaded) {
       syncService.loadAllDataToCache().catch(console.error);
@@ -40,14 +40,12 @@ export default function LicoPOSApp() {
     }
   }, [user, authLoading, dataLoaded]);
 
-  // Redirigir si no hay usuario autenticado
   useEffect(() => {
     if (!authLoading && !user) {
       router.replace('/login');
     }
   }, [user, authLoading, router]);
 
-  // ✅ CORREGIDO: Verificar bloqueo de terminal usando getAllTerminals + polling
   useEffect(() => {
     if (authLoading || !user || user.role === 'admin') {
       setTerminalBlocked(false);
@@ -62,12 +60,10 @@ export default function LicoPOSApp() {
       return;
     }
 
-    // Función para verificar el estado de bloqueo de la terminal
     const checkTerminalBlocked = async () => {
       try {
         const terminals = await syncService.getAllTerminals();
         const terminal = terminals.find((t: any) => t.id === user.terminalId);
-        console.log("🔍 Estado de terminal:", terminal);
         setTerminalBlocked(terminal?.isBlocked === true);
       } catch (error) {
         console.error('Error checking terminal block status:', error);
@@ -76,18 +72,11 @@ export default function LicoPOSApp() {
       }
     };
 
-    // Verificar estado inicial
     checkTerminalBlocked();
-
-    // Polling cada 3 segundos para actualizar el estado de bloqueo
     const interval = setInterval(checkTerminalBlocked, 3000);
-
-    return () => {
-      clearInterval(interval);
-    };
+    return () => clearInterval(interval);
   }, [user?.terminalId, authLoading, user]);
 
-  // Redirigir según rol y bloqueo
   useEffect(() => {
     if (user && state.isHydrated && !terminalBlocked && !checkingBlock) {
       const allowedPages = ['dashboard', 'pos', 'inventario', 'clientes', 'cuentas', 'proveedores', 'contabilidad', 'devoluciones', 'caja', 'registrar_compra'];
@@ -104,14 +93,12 @@ export default function LicoPOSApp() {
     }
   }, [user, state.isHydrated, state.currentPage, terminalBlocked, checkingBlock, state.setCurrentPage]);
 
-  // ✅ CORREGIDO: useBarcode con tipo correcto y manejo de barcode
   useBarcode((code) => {
     if (terminalBlocked) {
       toast({ title: "Terminal bloqueada", description: "No se pueden realizar ventas hasta que el administrador la desbloquee.", variant: "destructive" });
       return;
     }
     
-    // ✅ Buscar producto por código de barras (barcode puede ser undefined)
     const product = state.products.find((p) => p.barcode === code);
     
     if (product) {
@@ -130,7 +117,6 @@ export default function LicoPOSApp() {
     }
   });
 
-  // Pantalla de carga mientras se autentica o se verifica bloqueo
   if (authLoading || !state.isHydrated || !user || checkingBlock) {
     return (
       <div className="bg-background min-h-screen flex items-center justify-center">
@@ -142,7 +128,6 @@ export default function LicoPOSApp() {
     );
   }
 
-  // Pantalla de bloqueo global
   if (terminalBlocked) {
     return (
       <div className="fixed inset-0 bg-black/90 z-[9999] flex items-center justify-center">
@@ -169,6 +154,7 @@ export default function LicoPOSApp() {
         onPageChange={state.setCurrentPage}
         userRole={user.role}
         userName={user.name}
+        onToggleClients={() => setShowClientCreditModal(true)}
       />
       
       <main className="flex-1 flex flex-col overflow-hidden">
@@ -191,6 +177,13 @@ export default function LicoPOSApp() {
           {state.currentPage === 'caja' && <CashModule state={state} />}
         </div>
       </main>
+
+      <ClientCreditModal 
+        show={showClientCreditModal}
+        onClose={() => setShowClientCreditModal(false)}
+        state={state}
+      />
+      
       <Toaster />
     </div>
   );

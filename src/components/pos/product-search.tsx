@@ -1,14 +1,12 @@
 "use client";
 
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { Product, Client } from '@/lib/types';
-import { Search, Barcode, UserCircle, X } from 'lucide-react';
+import { Product } from '@/lib/types';
+import { Search, Barcode } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import ClientPanel from './client-panel';
 import { usePOSState } from '@/hooks/use-pos-state';
-import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
+import { formatUsd } from '@/lib/currency-formatter';
 
-// Umbral mínimo de stock por defecto (si el producto no tiene configurado uno)
 const DEFAULT_MIN_STOCK = 5;
 
 interface ProductSearchProps {
@@ -19,29 +17,24 @@ interface ProductSearchProps {
 export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
   const [query, setQuery] = useState('');
   const [isFocused, setIsFocused] = useState(false);
-  const [isClientSearch, setIsClientSearch] = useState(false);
-  const [viewingClient, setViewingClient] = useState<Client | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const productListRef = useRef<HTMLDivElement>(null);
 
-  // Obtener el stock mínimo de un producto
   const getProductMinStock = (product: any) => {
     return (product as any).minStock || DEFAULT_MIN_STOCK;
   };
 
-  // Obtener color del stock
   const getStockColor = (product: any) => {
     const minStock = getProductMinStock(product);
     if (product.stock === 0) {
       return "text-red-600 bg-red-50";
     } else if (product.stock <= minStock) {
-      return "text-black bg-yellow-200"; // Más contraste para stock crítico
+      return "text-black bg-yellow-200";
     } else {
-      return "text-black bg-green-200"; // Más contraste
+      return "text-black bg-green-200";
     }
   };
 
-  // Obtener texto del stock
   const getStockText = (product: any) => {
     const minStock = getProductMinStock(product);
     if (product.stock === 0) {
@@ -53,7 +46,6 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
     }
   };
 
-  // ✅ Mostrar TODOS los productos cuando el input tiene foco (sin query)
   const productResults = useMemo(() => {
     if (!query.trim() && !isFocused) return [];
     const q = query.toLowerCase();
@@ -62,42 +54,32 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
     if (q) {
       filtered = filtered.filter(p => 
         p.name.toLowerCase().includes(q) || 
-        p.barcode.includes(q) || 
-        p.category.toLowerCase().includes(q) ||
+        (p.barcode && p.barcode.includes(q)) || 
+        (p.category && (p.category as any).name.toLowerCase().includes(q)) ||
         (p.department && p.department.toLowerCase().includes(q))
       );
     }
     
-    return filtered.slice(0, 30); // Limitar a 30 productos para mejor rendimiento
+    return filtered.slice(0, 30);
   }, [query, state.products, isFocused]);
 
   const groupedProductResults = useMemo(() => {
     const groups: Record<string, Product[]> = {};
     productResults.forEach(p => {
-      if (!groups[p.category]) groups[p.category] = [];
-      groups[p.category].push(p);
+      const categoryName = (p.category as any)?.name || 'Varios';
+      if (!groups[categoryName]) groups[categoryName] = [];
+      groups[categoryName].push(p);
     });
     return groups;
   }, [productResults]);
 
-  const clientResults = useMemo(() => {
-    const q = query.toLowerCase().trim();
-    if (!q) return state.clients;
-    return state.clients.filter(c => 
-      c.name.toLowerCase().includes(q) || 
-      c.cedula.toLowerCase().includes(q)
-    );
-  }, [query, state.clients]);
-
-  // Obtener todos los productos planos para navegación con teclado
   const allFlatProducts = useMemo(() => {
     return productResults;
   }, [productResults]);
 
-  // Manejar navegación con teclado
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isFocused || isClientSearch || viewingClient) return;
+      if (!isFocused) return;
       
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -116,9 +98,8 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFocused, isClientSearch, viewingClient, allFlatProducts, selectedIndex, onAdd]);
+  }, [isFocused, allFlatProducts, selectedIndex, onAdd]);
 
-  // Scroll al elemento seleccionado
   useEffect(() => {
     if (selectedIndex >= 0 && productListRef.current) {
       const selectedElement = document.getElementById(`product-${selectedIndex}`);
@@ -130,7 +111,7 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
 
   return (
     <div className="flex flex-col h-full bg-primary relative">
-      <div className="p-3.5 z-50">
+      <div className="p-3.5">
         <div className={cn(
           "flex items-center bg-background border-2 border-black rounded-xl px-3 transition-all duration-200",
           isFocused && "border-black shadow-lg"
@@ -146,37 +127,15 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
               setSelectedIndex(-1);
             }}
             onBlur={() => setTimeout(() => setIsFocused(false), 200)}
-            placeholder={isClientSearch ? "BUSCAR CLIENTE..." : "BUSCAR PRODUCTO O ESCANEAR..."}
+            placeholder={"BUSCAR PRODUCTO O ESCANEAR..."}
             className="flex-1 bg-transparent border-none text-black px-2 py-3 text-base font-black focus:outline-none font-body placeholder:text-black"
           />
-          {isClientSearch ? (
-             <X size={22} className="text-black cursor-pointer hover:scale-110" onClick={() => { setIsClientSearch(false); setQuery(''); }} />
-          ) : (
-             <Barcode size={22} className="text-black font-black" />
-          )}
+          <Barcode size={22} className="text-black font-black" />
         </div>
-
-        <button 
-          onClick={() => {
-            setIsClientSearch(!isClientSearch);
-            setQuery('');
-            setViewingClient(null);
-            setSelectedIndex(-1);
-          }}
-          className={cn(
-            "w-full mt-2.5 flex items-center justify-center gap-2 p-3 rounded-xl font-black text-sm transition-all border-2 border-black",
-            isClientSearch || viewingClient 
-              ? "bg-black text-white" 
-              : "bg-white text-black hover:bg-black hover:text-white"
-          )}
-        >
-          <UserCircle size={20} />
-          {viewingClient ? 'CAMBIAR CLIENTE' : isClientSearch ? 'CANCELAR BÚSQUEDA' : 'VER CLIENTE'}
-        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-3.5 pb-3.5 space-y-2 scrollbar-thin" ref={productListRef}>
-        {!isClientSearch && !viewingClient && (query || isFocused) && (
+        {(query || isFocused) && (
           <div className="space-y-4 animate-in fade-in slide-in-from-top-2">
             {Object.entries(groupedProductResults).length === 0 ? (
               <div className="text-center py-8">
@@ -236,36 +195,6 @@ export default function ProductSearch({ state, onAdd }: ProductSearchProps) {
               ))
             )}
           </div>
-        )}
-
-        {isClientSearch && !viewingClient && (
-          <div className="space-y-1.5 animate-in fade-in slide-in-from-top-2">
-            {clientResults.map(c => (
-              <button 
-                key={c.id}
-                onClick={() => {
-                  setViewingClient(c);
-                  setIsClientSearch(false);
-                  setQuery('');
-                }}
-                className="w-full flex items-center gap-3 p-4 rounded-lg bg-white border-2 border-black hover:bg-black hover:text-white transition-all text-left group shadow-sm"
-              >
-                <UserCircle size={28} className="text-black group-hover:text-white" />
-                <div className="flex-1">
-                  <div className="text-base font-black text-black group-hover:text-white">{c.name}</div>
-                  <div className="text-xs font-black text-black group-hover:text-white/70">{c.cedula} | {c.phone}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {viewingClient && (
-          <ClientPanel 
-            client={viewingClient} 
-            state={state} 
-            onClose={() => setViewingClient(null)} 
-          />
         )}
       </div>
     </div>

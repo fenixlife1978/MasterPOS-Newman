@@ -86,7 +86,7 @@
     "electron-pos-printer": "^1.2.8",
     "electron-updater": "^6.1.0",
     "embla-carousel-react": "^8.6.0",
-    "firebase": "^11.10.0",
+    "firebase": "^12.15.0",
     "genkit": "^1.28.0",
     "idb": "^8.0.3",
     "lucide-react": "^0.475.0",

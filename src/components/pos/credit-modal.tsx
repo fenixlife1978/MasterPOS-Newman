@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { Client, CartItem } from '@/lib/types';
-import { Handshake, X, Search, UserPlus, UserCheck, DollarSign } from 'lucide-react';
+import { Handshake, X, Search, UserPlus, UserCheck, DollarSign, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
 
@@ -21,20 +21,18 @@ export default function CreditModal({ cart, clients, exchangeRate, total, onClos
   const [isNewMode, setIsNewMode] = useState(false);
   const [newClient, setNewClient] = useState({ name: '', cedula: '', phone: '', address: '' });
   const [showAllOnFocus, setShowAllOnFocus] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false); // Protección doble clic
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // ✅ Verificar si la cédula ya existe
   const isCedulaDuplicada = (cedula: string): boolean => {
     return clients.some(c => c.cedula?.toLowerCase() === cedula.toLowerCase());
   };
 
-  // Calcular total en USD
   const totalUsd = exchangeRate > 0 ? total / exchangeRate : 0;
 
-  // ✅ Mostrar todos los clientes cuando el campo de búsqueda recibe foco y no hay query
   const results = useMemo(() => {
     if (showAllOnFocus && !query.trim()) {
-      return clients; // todos los clientes
+      return clients;
     }
     if (!query.trim()) return [];
     const q = query.toLowerCase();
@@ -44,25 +42,26 @@ export default function CreditModal({ cart, clients, exchangeRate, total, onClos
     );
   }, [query, clients, showAllOnFocus]);
 
-  const handleFocus = () => {
-    setShowAllOnFocus(true);
-  };
+  const handleFocus = () => setShowAllOnFocus(true);
 
   const handleBlur = () => {
-    // Retrasar para permitir que el clic en el resultado se ejecute antes
     setTimeout(() => setShowAllOnFocus(false), 200);
   };
 
   const handleConfirm = () => {
+    if (isProcessing) return; // Prevenir doble clic
+    setIsProcessing(true); // Deshabilitar botón
+
     if (isNewMode) {
       if (!newClient.name || !newClient.cedula) {
         alert('Por favor complete el nombre y cédula del cliente');
+        setIsProcessing(false); // Reactivar botón
         return;
       }
       
-      // Verificar duplicado por cédula
       if (isCedulaDuplicada(newClient.cedula)) {
         alert(`Ya existe un cliente con la cédula ${newClient.cedula}. No se puede crear duplicado.`);
+        setIsProcessing(false); // Reactivar botón
         return;
       }
       
@@ -87,10 +86,11 @@ export default function CreditModal({ cart, clients, exchangeRate, total, onClos
         totalBs: total,
         totalUsd: totalUsd
       });
+    } else {
+      setIsProcessing(false); // Caso improbable, pero como salvaguarda
     }
   };
 
-  // Manejar Enter para confirmar
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (isNewMode ? (newClient.name && newClient.cedula) : selected)) {
       handleConfirm();
@@ -119,7 +119,6 @@ export default function CreditModal({ cart, clients, exchangeRate, total, onClos
           </button>
         </div>
 
-        {/* Mostrar Tasa BCV actual que se guardará */}
         <div className="bg-amber-500/20 border border-amber-500/30 rounded-lg p-3 mb-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -276,15 +275,17 @@ export default function CreditModal({ cart, clients, exchangeRate, total, onClos
           <button 
             onClick={onClose} 
             className="flex-1 py-3 rounded-lg border border-white/30 bg-[#0F1E3A] text-white font-bold text-sm hover:bg-[#1A2C4E] hover:border-white/50 transition-all"
+            disabled={isProcessing}
           >
             CANCELAR
           </button>
           <button 
-            disabled={isNewMode ? (!newClient.name || !newClient.cedula) : !selected}
+            disabled={isProcessing || (isNewMode ? (!newClient.name || !newClient.cedula) : !selected)}
             onClick={handleConfirm}
-            className="flex-1 py-3 bg-primary rounded-lg text-black font-black text-sm hover:brightness-110 disabled:opacity-30 transition-all"
+            className="flex-1 py-3 bg-primary rounded-lg text-black font-black text-sm hover:brightness-110 disabled:opacity-30 transition-all flex items-center justify-center gap-2"
           >
-            CONFIRMAR CRÉDITO
+            {isProcessing && <Loader2 size={16} className="animate-spin" />}
+            {isProcessing ? 'PROCESANDO...' : 'CONFIRMAR CRÉDITO'}
           </button>
         </div>
       </div>

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { Page } from '@/lib/types';
-import { Store, Boxes, ReceiptText, Vault, LayoutDashboard, Truck, BookOpen, ArrowLeftRight, ChevronLeft, ChevronRight, ShoppingBag } from 'lucide-react';
+import { Store, Boxes, ReceiptText, Vault, LayoutDashboard, Truck, BookOpen, ArrowLeftRight, ChevronLeft, ChevronRight, ShoppingBag, UserCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import LogoutButton from './LogoutButton';
 import Image from 'next/image';
@@ -12,9 +12,10 @@ interface SidebarProps {
   onPageChange: (page: Page) => void;
   userRole: string;
   userName: string;
+  onToggleClients: () => void;
 }
 
-export default function Sidebar({ currentPage, onPageChange, userRole }: SidebarProps) {
+export default function Sidebar({ currentPage, onPageChange, userRole, onToggleClients }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const isAdmin = userRole === 'admin';
   const isCashier = userRole === 'cashier';
@@ -49,7 +50,6 @@ export default function Sidebar({ currentPage, onPageChange, userRole }: Sidebar
       collapsed ? "w-[70px] min-w-[70px]" : "w-[240px] min-w-[240px]",
       "overflow-y-auto"
     )}>
-      {/* Logo y botón colapsar - sticky para que siempre esté visible */}
       <div className={cn(
         "sticky top-0 bg-primary z-10 pt-4 pb-4 border-b-2 border-black/10",
         collapsed ? "flex justify-center" : "flex justify-between items-center px-4"
@@ -99,9 +99,22 @@ export default function Sidebar({ currentPage, onPageChange, userRole }: Sidebar
             </button>
           );
         })}
+        {currentPage === 'pos' && (
+          <button
+            onClick={onToggleClients}
+            title={collapsed ? 'Ver Cliente' : undefined}
+            className={cn(
+              "w-full rounded-xl flex items-center gap-3.5 transition-all text-left group mt-4",
+              collapsed ? "justify-center px-0 h-[50px]" : "px-4 h-[50px]",
+              "bg-white text-black font-black hover:bg-gray-200"
+            )}
+          >
+            <UserCircle size={20} className="shrink-0 text-black" />
+            {!collapsed && <span className="text-[13px] font-black tracking-widest">VER CLIENTE</span>}
+          </button>
+        )}
       </nav>
       
-      {/* Botón de cierre de sesión - siempre visible al final del scroll */}
       <div className="px-3 py-6 mt-auto border-t-2 border-black/10 sticky bottom-0 bg-primary">
         {collapsed ? (
           <div className="flex justify-center">

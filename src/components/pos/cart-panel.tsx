@@ -1,9 +1,10 @@
+
 "use client";
 
 import { CartItem } from '@/lib/types';
 import { ShoppingCart, Trash2, Banknote, Receipt, Tag, PackageOpen, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import PriceTypeModal from './PriceTypeModal';
 
 const formatBs = (amount: number): string => {
@@ -53,10 +54,16 @@ export default function CartPanel({
 }: CartPanelProps) {
   const [showPriceModal, setShowPriceModal] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
-  const [tooltipVisible, setTooltipVisible] = useState<number | null>(null);
+
+  const cartWithUpdatedPrices = useMemo(() => {
+    return cart.map(item => ({
+      ...item,
+      priceBs: item.priceUsd * exchangeRate
+    }));
+  }, [cart, exchangeRate]);
 
   const selectedProduct = selectedProductId ? products.find(p => p.id === selectedProductId) : null;
-  const currentCartItem = selectedProductId ? cart.find(item => item.productId === selectedProductId) : null;
+  const currentCartItem = selectedProductId ? cartWithUpdatedPrices.find(item => item.productId === selectedProductId) : null;
 
   const handlePriceChange = (productId: number, newPriceUsd: number) => {
     const newPriceBs = newPriceUsd * exchangeRate;
@@ -89,7 +96,7 @@ export default function CartPanel({
     return true;
   };
 
-  const hasInsufficientKitStock = cart.some(item => {
+  const hasInsufficientKitStock = cartWithUpdatedPrices.some(item => {
     const fullProduct = getFullProduct(item.productId);
     if (fullProduct?.isKit && fullProduct?.kitComponents?.length) {
       return !isKitStockSufficient(item);
@@ -99,9 +106,9 @@ export default function CartPanel({
 
   const handleQuantityChange = (productId: number, newQty: number) => {
     if (isNaN(newQty) || newQty <= 0) {
-      onUpdateQty(productId, -999);
+      onUpdateQty(productId, -999); // Use a magic number to signify removal
     } else {
-      const currentItem = cart.find(item => item.productId === productId);
+      const currentItem = cartWithUpdatedPrices.find(item => item.productId === productId);
       if (currentItem) {
         const delta = newQty - currentItem.qty;
         onUpdateQty(productId, delta);
@@ -109,19 +116,23 @@ export default function CartPanel({
     }
   };
 
-  const subtotal = cart.reduce((s, i) => s + (i.priceBs * i.qty), 0);
-  const iva = cart.reduce((total, item) => {
-    const hasIva = (item as any).ivaType === 'con_iva';
-    if (hasIva) return total + (item.priceBs * item.qty * 0.16);
+  const subtotal = cartWithUpdatedPrices.reduce((s, i) => s + (i.priceBs * i.qty), 0);
+  
+  const ivaAmount = cartWithUpdatedPrices.reduce((total, item) => {
+    const isTaxable = (item as any).ivaType === 'con_iva';
+    if (isTaxable) {
+        return total + (item.priceBs * item.qty);
+    }
     return total;
-  }, 0);
+  }, 0) * 0.16;
+
+  const iva = isIvaEnabled ? ivaAmount : 0;
   const total = subtotal + iva;
-  const totalUsd = total / exchangeRate;
-  const hasAnyIvaProduct = cart.some(item => (item as any).ivaType === 'con_iva');
+  const totalUsd = total > 0 ? total / exchangeRate : 0;
   
   const formattedReceiptNumber = nextReceiptNumber.toString().padStart(8, '0');
   
-  const getRowClassName = (index: number) => index % 2 === 0 ? "bg-white" : "bg-gray-100";
+  const getRowClassName = (index: number) => index % 2 === 0 ? "bg-white" : "bg-gray-50";
 
   return (
     <>
@@ -142,7 +153,7 @@ export default function CartPanel({
               </div>
             )}
             <span className="bg-secondary text-white px-2 py-1 rounded-lg text-[10px] font-black">
-              {cart.length} ITEMS
+              {cartWithUpdatedPrices.length} ITEMS
             </span>
           </div>
         </div>
@@ -159,13 +170,13 @@ export default function CartPanel({
           </div>
 
           <div className="flex-1 overflow-y-auto scrollbar-thin">
-            {cart.length === 0 ? (
+            {cartWithUpdatedPrices.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center gap-4">
                 <ShoppingCart size={60} strokeWidth={2} className="text-black/10" />
                 <p className="text-lg font-black text-black/20 uppercase tracking-widest">Carrito vacío</p>
               </div>
             ) : (
-              cart.map((item, idx) => {
+              cartWithUpdatedPrices.map((item, idx) => {
                 const priceUsd = item.priceUsd;
                 const hasIva = (item as any).ivaType === 'con_iva';
                 const isKit = (item as any).isKit === true;
@@ -210,8 +221,14 @@ export default function CartPanel({
                           if (!isNaN(val) && val > 0) {
                             handleQuantityChange(item.productId, val);
                           } else if (e.target.value === '') {
+                            // Allow clearing the input, handle logic in onUpdateQty if needed
                           } else {
-                            handleQuantityChange(item.productId, 0);
+                            handleQuantityChange(item.productId, 1); // Reset to 1 if invalid
+                          }
+                        }}
+                        onBlur={(e) => {
+                          if (e.target.value === '' || parseInt(e.target.value) === 0) {
+                            handleQuantityChange(item.productId, 1); // Reset to 1 if empty or 0
                           }
                         }}
                         className="w-10 text-center text-sm font-black text-black bg-white rounded-md px-1 py-1 border-2 border-black focus:outline-none"
@@ -250,20 +267,20 @@ export default function CartPanel({
         </div>
 
         <div className="border-t-4 border-black bg-white shrink-0 shadow-lg">
-          <div className="p-3 space-y-2">
+          <div className="p-3 space-y-1">
             <div className="flex justify-between items-center">
               <span className="text-xs font-black text-black uppercase tracking-widest">Subtotal:</span>
               <span className="text-sm font-black text-black">{formatBs(subtotal)}</span>
             </div>
             
-            {hasAnyIvaProduct && iva > 0 && (
+            {isIvaEnabled && (
               <div className="flex justify-between items-center border-t border-black/10 pt-1">
                 <span className="text-xs font-black text-black uppercase tracking-widest">IVA (16%):</span>
                 <span className="text-sm font-black text-black">{formatBs(iva)}</span>
               </div>
             )}
             
-            <div className="pt-2 border-t-2 border-black flex justify-between items-center gap-3">
+            <div className="pt-1 border-t-2 border-black flex justify-between items-center gap-3">
               <div className="bg-primary/10 px-3 py-1.5 rounded-lg border-2 border-black/10 flex-1">
                 <div className="text-[8px] text-black font-black uppercase tracking-widest">Equivalente USD</div>
                 <div className="font-black text-xl text-black">
@@ -282,7 +299,7 @@ export default function CartPanel({
 
           <div className="p-3 pt-0">
             <button 
-              disabled={cart.length === 0 || !isRegisterOpen || hasInsufficientKitStock}
+              disabled={cartWithUpdatedPrices.length === 0 || !isRegisterOpen || hasInsufficientKitStock}
               onClick={onCobrar}
               className="w-full py-2.5 bg-primary text-black font-black text-lg flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-95 transition-all shadow-md disabled:bg-gray-400 border-2 border-black rounded-xl"
             >
