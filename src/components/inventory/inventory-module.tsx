@@ -9,7 +9,7 @@ import {
   FileText, Share2, Printer, Percent, AlertTriangle,
   DollarSign, Package, Layers, Boxes, PlusCircle,
   FileSpreadsheet, TrendingUp, Calculator, Info, Calendar,
-  Lock, Unlock
+  Lock, Unlock, Gift
 } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -82,7 +82,7 @@ const DEFAULT_CATEGORIES: Category[] = [
 ];
 const DEFAULT_DEPARTMENTS = ['Lubricantes', 'Motor', 'Frenos', 'Suspensión', 'Electricidad', 'Servicios', 'Otros'];
 
-type InventoryTab = 'catalogo' | 'reporte' | 'ajustes' | 'ventas';
+type InventoryTab = 'catalogo' | 'reporte' | 'ajustes' | 'ventas' | 'consumos';
 
 // ✅ MAPEO UNIFICADO DE TIPOS DE KARDEX (sincronizado con syncService.ts)
 // Este mapeo convierte los tipos internos a los que se muestran en la UI
@@ -111,10 +111,10 @@ const KARDEX_TYPE_MAP: Record<string, { label: string; badgeColor: string; isEnt
   'devolucion': { label: 'DEVOLUCIÓN', badgeColor: 'bg-purple-100 text-purple-700', isEntry: true, isExit: false },
   
   // ✅ COLABORACIONES
-  'colaboracion': { label: 'COLABORACIÓN', badgeColor: 'bg-indigo-100 text-indigo-700', isEntry: false, isExit: false },
+  'colaboracion': { label: 'COLABORACIÓN', badgeColor: 'bg-indigo-100 text-indigo-700', isEntry: false, isExit: true },
   
   // ✅ CONSUMOS
-  'consumo': { label: 'CONSUMO', badgeColor: 'bg-pink-100 text-pink-700', isEntry: false, isExit: false },
+  'consumo': { label: 'CONSUMO', badgeColor: 'bg-pink-100 text-pink-700', isEntry: false, isExit: true },
 };
 
 // ✅ Función para obtener el label y color de un tipo de kardex
@@ -138,8 +138,8 @@ const getEntryExit = (entry: KardexEntry): { entrada: number; salida: number } =
     return { entrada: 0, salida: absQty };
   }
   
-  // Para 'ajuste_manual', 'colaboracion', 'consumo': la cantidad define el signo
-  if (entry.type === 'ajuste_manual' || entry.type === 'colaboracion' || entry.type === 'consumo') {
+  // Para 'ajuste_manual': la cantidad define el signo
+  if (entry.type === 'ajuste_manual') {
     if (entry.quantity > 0) {
       return { entrada: absQty, salida: 0 };
     } else {
@@ -168,15 +168,16 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
   const [isRefreshing, setIsRefreshing] = useState(false);
   
   const [adjustingStock, setAdjustingStock] = useState<Product | null>(null);
+  const [adjustmentType, setAdjustmentType] = useState<'ajuste_manual' | 'consumo' | 'colaboracion'>('ajuste_manual');
   const [adjustmentDelta, setAdjustmentDelta] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
   const [showAuthCodeModal, setShowAuthCodeModal] = useState(false);
   const [authCodeInput, setAuthCodeInput] = useState('');
-  const [pendingAdjustment, setPendingAdjustment] = useState<{ product: Product; delta: number; reason: string } | null>(null);
+  const [pendingAdjustment, setPendingAdjustment] = useState<{ product: Product; delta: number; reason: string; type: 'ajuste_manual' | 'consumo' | 'colaboracion' } | null>(null);
   
-  const [adjustmentStartDate, setAdjustmentStartDate] = useState('');
-  const [adjustmentEndDate, setAdjustmentEndDate] = useState('');
   const [dateRangePreset, setDateRangePreset] = useState<'day' | 'month' | 'year' | 'custom'>('day');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
   
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [departments, setDepartments] = useState<string[]>(DEFAULT_DEPARTMENTS);
@@ -222,13 +223,10 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
   
   const [localPriceUsd, setLocalPriceUsd] = useState('');
   
-  // ✅ CÁLCULO DE VENTAS PARA REPORTE SEGMENTADO
-  const salesEntries = useMemo(() => {
-    const sales: (KardexEntry & { productName: string; isService: boolean; salePriceUsd: number })[] = [];
-    
+  const getDateRange = useMemo(() => {
+    const now = new Date();
     let start: Date | null = null;
     let end: Date | null = null;
-    const now = new Date();
     
     switch (dateRangePreset) {
       case 'day':
@@ -244,14 +242,20 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
         end = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
         break;
       case 'custom':
-        if (adjustmentStartDate && adjustmentEndDate) {
-          start = new Date(adjustmentStartDate);
+        if (customStartDate && customEndDate) {
+          start = new Date(customStartDate);
           start.setHours(0,0,0,0);
-          end = new Date(adjustmentEndDate);
+          end = new Date(customEndDate);
           end.setHours(23,59,59,999);
         }
         break;
     }
+    return { start, end };
+  }, [dateRangePreset, customStartDate, customEndDate]);
+
+  const salesEntries = useMemo(() => {
+    const { start, end } = getDateRange;
+    const sales: (KardexEntry & { productName: string; isService: boolean; salePriceUsd: number })[] = [];
 
     Object.entries(kardexEntries).forEach(([pid, entries]) => {
       const product = products.find(p => p.id === Number(pid));
@@ -274,13 +278,43 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
     });
     
     return sales.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [kardexEntries, products, dateRangePreset, adjustmentStartDate, adjustmentEndDate]);
+  }, [kardexEntries, products, getDateRange]);
 
   const salesSummary = useMemo(() => {
     const productIncome = salesEntries.filter(s => !s.isService).reduce((sum, s) => sum + (Math.abs(s.quantity) * s.salePriceUsd), 0);
     const serviceIncome = salesEntries.filter(s => s.isService).reduce((sum, s) => sum + (Math.abs(s.quantity) * s.salePriceUsd), 0);
     return { productIncome, serviceIncome, totalIncome: productIncome + serviceIncome };
   }, [salesEntries]);
+
+  const consumosYColaboraciones = useMemo(() => {
+    const { start, end } = getDateRange;
+    const consumos: (KardexEntry & { productName: string; costValueUsd: number })[] = [];
+    
+    Object.entries(kardexEntries).forEach(([pid, entries]) => {
+        const product = products.find(p => p.id === Number(pid));
+        if (!product) return;
+
+        entries.forEach(entry => {
+            if (entry.type === 'consumo' || entry.type === 'colaboracion') {
+                const entryDate = new Date(entry.date);
+                if (start && entryDate < start) return;
+                if (end && entryDate > end) return;
+
+                consumos.push({
+                    ...entry,
+                    productName: product.name,
+                    costValueUsd: Math.abs(entry.quantity) * (entry.costUsd || 0),
+                });
+            }
+        });
+    });
+
+    return consumos.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [kardexEntries, products, getDateRange]);
+
+  const totalConsumosYColaboracionesUsd = useMemo(() => {
+      return consumosYColaboraciones.reduce((sum, item) => sum + item.costValueUsd, 0);
+  }, [consumosYColaboraciones]);
 
   const isUpdatingRef = useRef(false);
   
@@ -720,116 +754,69 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
     return kardexEntries[productId] || [];
   };
   
-  const registerAdjustmentAccountingEntry = async (product: Product, delta: number, reason: string, exchangeRate: number) => {
-    const absDelta = Math.abs(delta);
-    const valorBs = absDelta * (product.costUsd || 0) * exchangeRate;
-    const entryType = delta > 0 ? 'ingreso' : 'egreso';
-    const category = 'Inventario';
-    const subcategory = delta > 0 ? 'Sobrante' : 'Merma / Rotura';
-    const concept = delta > 0 ? 'Ajuste positivo de inventario' : 'Ajuste negativo de inventario';
-    const description = `${reason} | Producto: ${product.name} (${product.barcode}) | Cantidad: ${absDelta} uds | Costo USD: ${formatUsd(product.costUsd || 0, 4)}`;
-    
-    const accountingEntry = {
-      id: String(Date.now()),
-      date: new Date().toISOString(),
-      type: entryType as any,
-      category,
-      subcategory,
-      concept,
-      description,
-      amount: roundTo2(valorBs),
-      referenceId: String(product.id),
-      referenceType: 'inventory_adjustment',
-      createdAt: new Date().toISOString(),
-    };
-    
-    await syncService.saveAccountingEntry(accountingEntry);
-    toast({ title: "Asiento contable registrado", description: `${entryType === 'ingreso' ? 'Ingreso' : 'Egreso'} por ${formatBs(valorBs)}` });
-  };
-  
   const requestStockAdjust = (product: Product) => {
     setAdjustingStock(product);
     setAdjustmentDelta('');
     setAdjustmentReason('');
+    setAdjustmentType('ajuste_manual');
   };
   
   const confirmStockAdjustmentRequest = () => {
     if (!adjustingStock) return;
     
+    const isManualAdjustment = adjustmentType === 'ajuste_manual';
     const rawDelta = adjustmentDelta.trim();
     
-    if (!rawDelta) {
-      toast({ 
-        title: "Error", 
-        description: "Debe ingresar una cantidad con su signo (+ o -)", 
-        variant: "destructive" 
-      });
+    if (isManualAdjustment && !rawDelta) {
+      toast({ title: "Error", description: "Debe ingresar una cantidad con su signo (+ o -)", variant: "destructive" });
       return;
     }
     
-    if (!rawDelta.startsWith('+') && !rawDelta.startsWith('-')) {
-      toast({ 
-        title: "Formato incorrecto", 
-        description: "Debe comenzar con + (para agregar) o - (para quitar). Ejemplo: +5 o -3", 
-        variant: "destructive" 
-      });
+    if (isManualAdjustment && !rawDelta.startsWith('+') && !rawDelta.startsWith('-')) {
+      toast({ title: "Formato incorrecto", description: "Debe comenzar con + o -. Ejemplo: +5 o -3", variant: "destructive" });
       return;
     }
-    
-    const numericPart = rawDelta.substring(1);
-    if (!/^\d+$/.test(numericPart)) {
-      toast({ 
-        title: "Formato incorrecto", 
-        description: "Después del signo solo debe haber números. Ejemplo: +5 o -3", 
-        variant: "destructive" 
-      });
+
+    const numericPart = isManualAdjustment ? rawDelta.substring(1) : rawDelta;
+    if (!/^[1-9]\d*$/.test(numericPart)) {
+      toast({ title: "Cantidad inválida", description: "Ingrese un número entero mayor a 0.", variant: "destructive" });
       return;
     }
     
     const delta = parseInt(rawDelta);
     
     if (delta === 0) {
-      toast({ 
-        title: "Error", 
-        description: "La cantidad debe ser mayor que 0. Ejemplo: +5 o -3", 
-        variant: "destructive" 
-      });
+      toast({ title: "Error", description: "La cantidad no puede ser cero.", variant: "destructive" });
       return;
     }
     
-    const newQty = adjustingStock.stock + delta;
+    const finalDelta = adjustmentType === 'ajuste_manual' ? delta : -Math.abs(delta);
+
+    const newQty = adjustingStock.stock + finalDelta;
     if (newQty < 0) {
-      toast({ 
-        title: "Error", 
-        description: "El stock no puede quedar negativo", 
-        variant: "destructive" 
-      });
+      toast({ title: "Error", description: "El stock no puede quedar negativo", variant: "destructive" });
       return;
     }
     
     if (!adjustmentReason.trim()) {
-      toast({ 
-        title: "Error", 
-        description: "Ingrese un motivo para el ajuste", 
-        variant: "destructive" 
-      });
+      toast({ title: "Error", description: "Ingrese un motivo para el ajuste", variant: "destructive" });
       return;
     }
     
     setPendingAdjustment({
       product: adjustingStock,
-      delta,
-      reason: adjustmentReason
+      delta: finalDelta,
+      reason: adjustmentReason,
+      type: adjustmentType
     });
     setShowAuthCodeModal(true);
   };
   
   const verifyAuthCode = async () => {
     const adminCodeData = await syncService.getAdminCode();
-    // ✅ CORRECCIÓN QUIRÚRGICA: Forzar comparación de cadenas de texto para evitar fallos de tipo
     if (adminCodeData && String(adminCodeData.code) === String(authCodeInput)) {
       if (pendingAdjustment) {
-        const { product, delta, reason } = pendingAdjustment;
+        const { product, delta, reason, type } = pendingAdjustment;
         const previousStock = product.stock;
         const newQty = previousStock + delta;
         const updatedProduct = { ...product, stock: newQty };
@@ -840,19 +827,19 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
           id: `${Date.now()}_${Math.random()}`,
           productId: Number(product.id),
           date: new Date().toISOString(),
-          type: 'ajuste_manual',
+          type: type,
           quantity: delta,
           previousStock: previousStock,
           newStock: newQty,
-          reference: `Ajuste manual - ${reason}`,
+          reference: `Ajuste - ${reason}`,
           note: reason,
           costUsd: product.costUsd,
         };
         await syncService.saveKardexEntry(kardexEntry);
         addKardexEntryLocal(Number(product.id), kardexEntry);
         await syncService.syncAllPending();
-        await registerAdjustmentAccountingEntry(product, delta, reason, state.exchangeRate);
-        toast({ title: "Ajuste Realizado", description: `${delta > 0 ? 'Agregadas' : 'Quitadas'} ${Math.abs(delta)} unidades. Nuevo stock: ${newQty}` });
+        
+        toast({ title: "Ajuste Realizado", description: `${type === 'ajuste_manual' ? (delta > 0 ? 'Agregadas' : 'Quitadas') : 'Registrada salida por ' + type} ${Math.abs(delta)} unidades. Nuevo stock: ${newQty}` });
         setAdjustingStock(null);
         setPendingAdjustment(null);
         setAuthCodeInput('');
@@ -1066,7 +1053,7 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             <h1>MasterPOS - Reporte de Ventas Segmentado</h1>
           </div>
           <div class="info">
-            <p><strong>Periodo:</strong> ${dateRangePreset === 'custom' ? `${adjustmentStartDate} al ${adjustmentEndDate}` : dateRangePreset}</p>
+            <p><strong>Periodo:</strong> ${dateRangePreset === 'custom' ? `${customStartDate} al ${customEndDate}` : dateRangePreset}</p>
             <p><strong>Fecha de Generación:</strong> ${new Date().toLocaleString('es-VE')}</p>
           </div>
           <table>
@@ -1212,51 +1199,18 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
   }, [products, kardexEntries, state.exchangeRate]);
   
   const filteredAdjustments = useMemo(() => {
-    let start: Date | null = null;
-    let end: Date | null = null;
-    
-    const now = new Date();
-    switch (dateRangePreset) {
-      case 'day':
-        start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, -1);
-        break;
-      case 'month':
-        start = new Date(now.getFullYear(), now.getMonth(), 1);
-        end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-        break;
-      case 'year':
-        start = new Date(now.getFullYear(), 0, 1);
-        end = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
-        break;
-      case 'custom':
-        if (adjustmentStartDate && adjustmentEndDate) {
-          start = new Date(adjustmentStartDate);
-          start.setHours(0,0,0,0);
-          end = new Date(adjustmentEndDate);
-          end.setHours(23,59,59,999);
-        }
-        break;
-    }
-    
+    const { start, end } = getDateRange;
     if (!start) return allAdjustments;
     
     return allAdjustments.filter(adj => {
       const adjDate = new Date(adj.date);
       return adjDate >= start! && adjDate <= (end || new Date());
     });
-  }, [allAdjustments, dateRangePreset, adjustmentStartDate, adjustmentEndDate]);
-  
-  const totalAdjustmentValue = useMemo(() => {
-    return filteredAdjustments.reduce((sum, adj) => {
-      const valorBs = Math.abs(adj.quantity) * (adj.costUsd || 0) * state.exchangeRate;
-      return sum + valorBs;
-    }, 0);
-  }, [filteredAdjustments, state.exchangeRate]);
+  }, [allAdjustments, getDateRange]);
   
   const totalAdjustmentUsd = useMemo(() => {
     return filteredAdjustments.reduce((sum, adj) => {
-      return sum + (Math.abs(adj.quantity) * (adj.costUsd || 0));
+      return sum + (adj.quantity * (adj.costUsd || 0));
     }, 0);
   }, [filteredAdjustments]);
   
@@ -1410,7 +1364,19 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
           )}
         >
           <TrendingUp size={14} />
-          Reporte de Ventas (Ingresos)
+          Reporte de Ventas
+        </button>
+        <button
+          onClick={() => setActiveTab('consumos')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg font-black text-sm transition-all",
+            activeTab === 'consumos'
+              ? "bg-white text-black border border-b-0 border-[#9E9E9E]"
+              : "text-black hover:bg-white/50"
+          )}
+        >
+          <Gift size={14} />
+          Colaboraciones y Consumos
         </button>
       </div>
       
@@ -1599,13 +1565,13 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             </div>
             {dateRangePreset === 'custom' && (
               <div className="flex items-center gap-2">
-                <Input type="date" value={adjustmentStartDate} onChange={e => setAdjustmentStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <Input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
                 <span className="text-xs font-black">-</span>
-                <Input type="date" value={adjustmentEndDate} onChange={e => setAdjustmentEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <Input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
               </div>
             )}
             <div className="ml-auto text-xs bg-gray-100 px-3 py-1 rounded-full font-black text-black">
-              Total ajustes: <span className="font-black">{formatUsd(totalAdjustmentUsd)}</span>
+              Efecto Neto en Inventario: <span className="font-black">{formatUsd(totalAdjustmentUsd)}</span>
             </div>
           </div>
           <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
@@ -1632,12 +1598,12 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
                       </td>
                       <td className="p-2 text-center">
                         <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black", adj.quantity > 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>
-                          {adj.quantity > 0 ? "INGRESO" : "EGRESO"}
+                          {adj.quantity > 0 ? "ENTRADA" : "SALIDA"}
                         </span>
                       </td>
                       <td className="p-2 text-right font-mono font-black text-black">{Math.abs(adj.quantity)} uds</td>
                       <td className="p-2 text-right font-mono font-black text-black">{formatUsd(adj.costUsd || 0, 4)}</td>
-                      <td className="p-2 text-right font-mono font-black text-black">{formatBs(Math.abs(adj.quantity) * (adj.costUsd || 0) * state.exchangeRate)}</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatBs(adj.quantity * (adj.costUsd || 0) * state.exchangeRate)}</td>
                       <td className="p-2 text-left max-w-[200px] truncate font-black text-black" title={adj.note || adj.reference}>{adj.note || adj.reference}</td>
                     </tr>
                   ))}
@@ -1649,11 +1615,10 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             </div>
             <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
               <span>{filteredAdjustments.length} registros</span>
-              <span>Los ajustes generan automáticamente asientos contables (ingresos/egresos)</span>
             </div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === 'ventas' ? (
         <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
           <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -1667,9 +1632,9 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             </div>
             {dateRangePreset === 'custom' && (
               <div className="flex items-center gap-2">
-                <Input type="date" value={adjustmentStartDate} onChange={e => setAdjustmentStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <Input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
                 <span className="text-xs font-black">-</span>
-                <Input type="date" value={adjustmentEndDate} onChange={e => setAdjustmentEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <Input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
               </div>
             )}
             <div className="ml-auto flex items-center gap-2">
@@ -1715,6 +1680,71 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
               <span>Total Ingresos: {formatUsd(salesSummary.totalIncome)}</span>
               <span>{salesEntries.length} transacciones</span>
+            </div>
+          </div>
+        </div>
+      ) : activeTab === 'consumos' && (
+        <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
+          <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-black uppercase text-black">Filtrar por:</span>
+              <div className="flex gap-1">
+                <button onClick={() => setDateRangePreset('day')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'day' ? "bg-primary text-black" : "bg-white text-black")}>Hoy</button>
+                <button onClick={() => setDateRangePreset('month')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'month' ? "bg-primary text-black" : "bg-white text-black")}>Este Mes</button>
+                <button onClick={() => setDateRangePreset('year')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'year' ? "bg-primary text-black" : "bg-white text-black")}>Este Año</button>
+                <button onClick={() => setDateRangePreset('custom')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'custom' ? "bg-primary text-black" : "bg-white text-black")}>Personalizado</button>
+              </div>
+            </div>
+            {dateRangePreset === 'custom' && (
+              <div className="flex items-center gap-2">
+                <Input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <span className="text-xs font-black">-</span>
+                <Input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+              </div>
+            )}
+            <div className="ml-auto text-xs bg-gray-100 px-3 py-1 rounded-full font-black text-black">
+              Costo Total (pérdida): <span className="font-black text-red-600">{formatUsd(totalConsumosYColaboracionesUsd)}</span>
+            </div>
+          </div>
+          <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
+            <div className="overflow-x-auto flex-1">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-100 sticky top-0">
+                  <tr>
+                    <th className="p-2 text-left font-black text-black">Fecha</th>
+                    <th className="p-2 text-left font-black text-black">Producto</th>
+                    <th className="p-2 text-center font-black text-black">Tipo</th>
+                    <th className="p-2 text-right font-black text-black">Cantidad</th>
+                    <th className="p-2 text-right font-black text-black">Costo Unitario (USD)</th>
+                    <th className="p-2 text-right font-black text-black">Costo Total (USD)</th>
+                    <th className="p-2 text-left font-black text-black">Motivo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {consumosYColaboraciones.map((item, idx) => (
+                    <tr key={`${item.id}_${idx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="p-2 whitespace-nowrap text-[11px] font-mono font-black text-black">{formatVenezuelaDateTime(item.date)}</td>
+                      <td className="p-2 font-black text-black">{item.productName}</td>
+                      <td className="p-2 text-center">
+                        <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black", getKardexTypeInfo(item.type).badgeColor)}>
+                          {getKardexTypeInfo(item.type).label}
+                        </span>
+                      </td>
+                      <td className="p-2 text-right font-mono font-black text-black">{Math.abs(item.quantity)} uds</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatUsd(item.costUsd || 0, 4)}</td>
+                      <td className="p-2 text-right font-mono font-black text-red-600">{formatUsd(item.costValueUsd)}</td>
+                      <td className="p-2 text-left max-w-[200px] truncate font-black text-black" title={item.note || item.reference}>{item.note || item.reference}</td>
+                    </tr>
+                  ))}
+                  {consumosYColaboraciones.length === 0 && (
+                    <tr><td colSpan={7} className="p-4 text-center text-black font-black italic">No hay consumos o colaboraciones en el período seleccionado</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
+              <span>{consumosYColaboraciones.length} registros</span>
+              <span className="text-red-600">Estas salidas de inventario se valoran al costo y representan una pérdida.</span>
             </div>
           </div>
         </div>
@@ -1857,25 +1887,34 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
           </DialogHeader>
           <div className="p-4 space-y-3">
             <div>
+              <label className="text-[9px] font-black uppercase block mb-1">Tipo de Ajuste</label>
+              <select value={adjustmentType} onChange={(e) => setAdjustmentType(e.target.value as any)} className="w-full h-9 bg-white border border-[#9E9E9E] rounded-lg px-3 text-xs font-black focus:outline-none focus:ring-2 focus:ring-primary/50">
+                <option value="ajuste_manual">Ajuste Manual (+/-)</option>
+                <option value="consumo">Salida por Consumo Interno</option>
+                <option value="colaboracion">Salida por Colaboración</option>
+              </select>
+            </div>
+            <div>
               <label className="text-[9px] font-black uppercase block mb-1">
-                Cantidad a ajustar (negativa para quitar, positiva para agregar)
+                {adjustmentType === 'ajuste_manual' ? 'Cantidad a ajustar (+/-)' : 'Cantidad (salida)'}
               </label>
               <Input 
                 type="text" 
                 value={adjustmentDelta} 
                 onChange={(e) => setAdjustmentDelta(e.target.value)} 
                 className="text-sm font-mono font-black text-black" 
-                placeholder="Ej: +5 o -3" 
+                placeholder={adjustmentType === 'ajuste_manual' ? "Ej: +5 o -3" : "Ej: 5"}
               />
               {adjustingStock && (
                 <p className="text-[8px] text-black font-black mt-1">
                   Stock actual: {adjustingStock.stock} uds → Nuevo stock: {
                     (() => {
                       const raw = adjustmentDelta.trim();
-                      if (raw.startsWith('+') || raw.startsWith('-')) {
+                      const isManual = adjustmentType === 'ajuste_manual';
+                      if ((isManual && (raw.startsWith('+') || raw.startsWith('-'))) || !isManual) {
                         const num = parseInt(raw);
                         if (!isNaN(num)) {
-                          return adjustingStock.stock + num;
+                          return adjustingStock.stock + (isManual ? num : -Math.abs(num));
                         }
                       }
                       return adjustingStock.stock;
@@ -1891,7 +1930,7 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
                 onChange={(e) => setAdjustmentReason(e.target.value)} 
                 rows={2} 
                 className="w-full border rounded-lg px-2 py-1 text-xs resize-none font-black text-black" 
-                placeholder="Ej: Rotura, merma, inventario físico, sobrante..." 
+                placeholder="Ej: Rotura, consumo personal, donación..." 
               />
             </div>
             <div className="flex justify-end gap-2">

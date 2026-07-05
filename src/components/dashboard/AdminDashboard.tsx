@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { usePOSState } from '@/hooks/use-pos-state';
 import { useSuppliers } from '@/hooks/use-suppliers';
 import InvoiceNotifications from '@/components/ui/InvoiceNotifications';
@@ -8,10 +8,10 @@ import InvoiceReminderModal from '@/components/ui/InvoiceReminderModal';
 import CloseHistoryModal from '@/components/register/close-history-modal';
 import { 
   TrendingUp, DollarSign, Users, Package, 
-  CreditCard, ShoppingBag, Computer, FileText,
-  Calendar, ArrowUp, ArrowDown, Truck, Eye,
+  CreditCard, Computer, FileText,
+  Eye,
   RefreshCw, Lock, KeyRound, Save, AlertTriangle,
-  Trash2, XCircle, Archive, Unlock
+  Trash2, XCircle, Archive, Truck
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import TerminalManager from '@/components/admin/TerminalManager';
@@ -23,7 +23,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
+import { formatBs, formatUsd } from '@/lib/currency-formatter';
 import { db, rtdb } from '@/lib/firebase';
 import { 
   collection, 
@@ -31,9 +31,9 @@ import {
   doc, 
   setDoc, 
   writeBatch,
-  deleteDoc
 } from 'firebase/firestore';
-import { ref, get, set } from 'firebase/database';
+import { ref, set } from 'firebase/database';
+import { Transaction, Payment, SupplierPayment } from '@/lib/types';
 
 interface AdminDashboardProps {
   state: ReturnType<typeof usePOSState>;
@@ -44,10 +44,7 @@ type AdminTab = 'dashboard' | 'reports' | 'terminals' | 'users' | 'supervision';
 export default function AdminDashboard({ state }: AdminDashboardProps) {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
-  const { suppliers, invoices } = useSuppliers();
-  
-  const [monthlyRevenue, setMonthlyRevenue] = useState(0);
-  const [monthlyExpenses, setMonthlyExpenses] = useState(0);
+  const { suppliers, invoices, payments: supplierPayments } = useSuppliers();
   
   const [exchangeRateInput, setExchangeRateInput] = useState(state.exchangeRate.toString());
   const [isUpdatingRate, setIsUpdatingRate] = useState(false);
@@ -74,31 +71,40 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
     loadAdminCode();
   }, []);
 
-  const calculateMonthlyRevenue = () => {
+  const monthlyMetrics = useMemo(() => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const revenueBs = state.transactions
-      .filter(t => t.type === 'contado' && new Date(t.date) >= startOfMonth)
-      .reduce((sum, t) => sum + (t.total || 0), 0);
-    const revenueUsd = revenueBs / state.exchangeRate;
-    setMonthlyRevenue(roundTo2(revenueUsd));
-  };
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-  const calculateMonthlyExpenses = () => {
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const expenses = invoices
-      .filter(inv => inv.paidAmount > 0 && new Date(inv.date) >= startOfMonth)
-      .reduce((sum, inv) => sum + inv.paidAmount, 0);
-    setMonthlyExpenses(expenses);
-  };
+    const salesTx = state.transactions.filter((t: Transaction) => 
+      (t.type === 'contado' || t.type === 'cobro_deuda') && 
+      new Date(t.date) >= startOfMonth && 
+      new Date(t.date) <= endOfMonth
+    );
 
-  useEffect(() => {
-    calculateMonthlyRevenue();
-    calculateMonthlyExpenses();
-  }, [state.transactions, invoices, state.exchangeRate]);
+    let revenueBs = 0;
+    salesTx.forEach((t: Transaction) => {
+      if (t.type === 'contado') {
+        revenueBs += t.total || 0;
+      } else if (t.type === 'cobro_deuda') {
+        const payment = t.payments?.find((p: Payment) => p.method !== 'credit');
+        if (payment) {
+          revenueBs += payment.amount || 0;
+        }
+      }
+    });
+    
+    const monthlyRevenue = revenueBs / state.exchangeRate;
 
-  const roundTo2 = (num: number) => Math.round(num * 100) / 100;
+    const paidExpenses = supplierPayments.filter((p: SupplierPayment) => {
+      const paymentDate = new Date(p.date);
+      return paymentDate >= startOfMonth && paymentDate <= endOfMonth;
+    });
+    
+    const monthlyExpenses = paidExpenses.reduce((sum: number, p: SupplierPayment) => sum + (p.amountUsd || 0), 0);
+
+    return { monthlyRevenue, monthlyExpenses };
+  }, [state.transactions, supplierPayments, state.exchangeRate]);
 
   const handleUpdateExchangeRate = async () => {
     const newRate = parseFloat(exchangeRateInput);
@@ -168,22 +174,10 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
       let currentAdminCode = adminPin || '123456';
 
       const firestoreCollections = [
-        'transactions',
-        'accounts',
-        'products',
-        'clients',
-        'suppliers',
-        'purchase_invoices',
-        'purchase_items',
-        'supplier_payments',
-        'accounting_entries',
-        'kardex_entries',
-        'terminals',
-        'registers',
-        'cash_closes',
-        'cash_sessions',
-        'global_settings',
-        'register',
+        'transactions', 'accounts', 'products', 'clients', 'suppliers',
+        'purchase_invoices', 'purchase_items', 'supplier_payments',
+        'accounting_entries', 'kardex_entries', 'terminals', 'registers',
+        'cash_closes', 'cash_sessions', 'global_settings', 'register',
       ];
 
       for (const collectionName of firestoreCollections) {
@@ -192,9 +186,7 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
           const snapshot = await getDocs(colRef);
           if (!snapshot.empty) {
             const batch = writeBatch(db);
-            snapshot.forEach(doc => {
-              batch.delete(doc.ref);
-            });
+            snapshot.forEach(doc => batch.delete(doc.ref));
             await batch.commit();
           }
         } catch (error) {
@@ -203,28 +195,15 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
       }
 
       const rtdbNodes = [
-        'transactions',
-        'accounts',
-        'products',
-        'clients',
-        'suppliers',
-        'purchase_invoices',
-        'purchase_items',
-        'supplier_payments',
-        'accounting_entries',
-        'kardex_entries',
-        'terminals',
-        'registers',
-        'cash_closes',
-        'global_settings',
-        'register',
-        'terminal_transactions',
+        'transactions', 'accounts', 'products', 'clients', 'suppliers',
+        'purchase_invoices', 'purchase_items', 'supplier_payments',
+        'accounting_entries', 'kardex_entries', 'terminals', 'registers',
+        'cash_closes', 'global_settings', 'register', 'terminal_transactions',
       ];
 
       for (const nodeName of rtdbNodes) {
         try {
-          const nodeRef = ref(rtdb, nodeName);
-          await set(nodeRef, null);
+          await set(ref(rtdb, nodeName), null);
         } catch (error) {
           console.error(`❌ Error borrando ${nodeName}:`, error);
         }
@@ -233,18 +212,6 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
       for (const user of usersToKeep) {
         try {
           await setDoc(doc(db, 'users', user.id), user);
-          const rtdbUserData = {
-            uid: user.uid || user.id,
-            name: user.name || '',
-            email: user.email || '',
-            role: user.role || 'user',
-            terminalId: user.terminalId || null,
-            terminalName: user.terminalName || null,
-            status: user.status || 'active',
-            createdAt: user.createdAt || new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-          await set(ref(rtdb, `users/${user.id}`), rtdbUserData);
         } catch (error) {
           console.error(`❌ Error restaurando usuario ${user.id}:`, error);
         }
@@ -259,21 +226,11 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
       try {
         const keys = Object.keys(localStorage);
         for (const key of keys) {
-          if (
-            key.startsWith('pos_cache_') || 
-            key.startsWith('last_receipt_number_') || 
-            key.startsWith('last_return_number_') ||
-            key.startsWith('pos_register_') ||
-            key.startsWith('invoice_reminder_') ||
-            key.startsWith('cierre_final_') ||
-            key.startsWith('corte_parcial_')
-          ) {
+          if (key.startsWith('pos_cache_') || key.startsWith('last_receipt_') || key.startsWith('pos_register_') || key.startsWith('invoice_reminder_') || key.startsWith('cierre_') || key.startsWith('corte_')) {
             localStorage.removeItem(key);
           }
         }
         localStorage.removeItem('bcv_exchange_rate');
-        localStorage.removeItem('last_receipt_number');
-        localStorage.removeItem('pos_register_default');
       } catch (error) {
         console.error('❌ Error limpiando caché local:', error);
       }
@@ -284,9 +241,7 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
         variant: "default"
       });
 
-      setTimeout(() => {
-        window.location.reload();
-      }, 3000);
+      setTimeout(() => window.location.reload(), 3000);
 
       setShowResetModal(false);
       setResetPinInput('');
@@ -301,13 +256,12 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
 
   const totalProducts = state.products.length;
   const totalClients = state.clients.length;
-  const totalSales = state.transactions.filter(t => t.type === 'contado').length;
-  const totalRevenue = state.transactions.filter(t => t.type === 'contado').reduce((sum, t) => sum + t.total, 0);
-  const totalCreditBs = state.accounts.reduce((sum, acc) => sum + (acc.amountBs - (acc.paidAmount || 0)), 0);
+  const totalSales = state.transactions.filter((t:any) => t.type === 'contado').length;
+  const totalCreditBs = state.accounts.reduce((sum:any, acc:any) => sum + (acc.amountBs - (acc.paidAmount || 0)), 0);
   const totalCreditUsd = totalCreditBs / state.exchangeRate;
-  const totalPayable = invoices.reduce((sum, inv) => sum + (inv.total - inv.paidAmount), 0);
-  const outOfStock = state.products.filter(p => p.stock === 0).length;
-  const lowStock = state.products.filter(p => p.stock > 0 && p.stock <= 5).length;
+  const totalPayable = invoices.reduce((sum:any, inv:any) => sum + (inv.total - inv.paidAmount), 0);
+  const outOfStock = state.products.filter((p:any) => p.stock === 0).length;
+  const lowStock = state.products.filter((p:any) => p.stock > 0 && p.stock <= 5).length;
 
   const tabs = [
     { id: 'dashboard' as AdminTab, label: 'Dashboard', icon: TrendingUp },
@@ -316,7 +270,7 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
     { id: 'users' as AdminTab, label: 'Usuarios', icon: Users },
     { id: 'supervision' as AdminTab, label: 'Supervisión', icon: Eye },
   ];
-
+  
   const maskPin = (pin: any): string => {
     const pinStr = String(pin || '');
     return pinStr.split('').map(() => '•').join('');
@@ -333,139 +287,61 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
               <h2 className="text-2xl font-headline font-black text-black uppercase">Panel de Administración</h2>
               <p className="text-sm font-black text-black mt-1 uppercase tracking-widest">Gestiona tu negocio desde un solo lugar</p>
             </div>
-            
             <div className="flex items-center gap-3">
               <div className="bg-[#1A2C4E] rounded-xl p-3 flex items-center gap-3 shadow-md">
-                <div className="bg-primary/20 rounded-lg p-2">
-                  <DollarSign size={18} className="text-primary" />
-                </div>
+                <div className="bg-primary/20 rounded-lg p-2"><DollarSign size={18} className="text-primary" /></div>
                 <div>
                   <p className="text-[10px] font-black uppercase text-white">TASA BCV</p>
                   <div className="flex items-center gap-2">
-                    <Input 
-                      type="text"
-                      inputMode="decimal"
-                      value={exchangeRateInput}
-                      onChange={(e) => setExchangeRateInput(e.target.value)}
-                      className="h-7 w-24 text-xs font-mono font-black bg-white/10 border-white/20 text-white focus:border-primary"
-                      placeholder="0.00"
-                    />
-                    <Button
-                      onClick={handleUpdateExchangeRate}
-                      disabled={isUpdatingRate}
-                      size="sm"
-                      className="h-7 px-2 bg-primary text-black font-black text-[10px]"
-                    >
-                      <RefreshCw size={10} className={cn("mr-1", isUpdatingRate && "animate-spin")} />
-                      Actualizar
+                    <Input type="text" inputMode="decimal" value={exchangeRateInput} onChange={(e) => setExchangeRateInput(e.target.value)} className="h-7 w-24 text-xs font-mono font-black bg-white/10 border-white/20 text-white focus:border-primary" placeholder="0.00" />
+                    <Button onClick={handleUpdateExchangeRate} disabled={isUpdatingRate} size="sm" className="h-7 px-2 bg-primary text-black font-black text-[10px]">
+                      <RefreshCw size={10} className={cn("mr-1", isUpdatingRate && "animate-spin")} /> Actualizar
                     </Button>
                   </div>
                 </div>
               </div>
-              
-              <Button
-                onClick={() => setShowHistoryModal(true)}
-                variant="outline"
-                className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs border-blue-500"
-              >
-                <Archive size={14} className="mr-2" />
-                HISTORIAL CIERRES
+              <Button onClick={() => setShowHistoryModal(true)} variant="outline" className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white font-black text-xs border-blue-500">
+                <Archive size={14} className="mr-2" /> HISTORIAL CIERRES
               </Button>
-              
-              <Button
-                onClick={() => setShowResetModal(true)}
-                variant="outline"
-                className="h-10 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs border-red-500"
-              >
-                <Trash2 size={14} className="mr-2" />
-                RESET SISTEMA
+              <Button onClick={() => setShowResetModal(true)} variant="outline" className="h-10 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs border-red-500">
+                <Trash2 size={14} className="mr-2" /> RESET SISTEMA
               </Button>
             </div>
           </div>
-          
           <div className="flex gap-2 mt-4 border-b border-[#9E9E9E] pb-2 flex-wrap">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={cn(
-                    "flex items-center gap-2 px-4 py-2 rounded-lg font-black text-sm transition-all",
-                    isActive
-                      ? "bg-primary text-black"
-                      : "text-black hover:bg-primary/20"
-                  )}
-                >
-                  <Icon size={16} />
-                  {tab.label}
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={cn("flex items-center gap-2 px-4 py-2 rounded-lg font-black text-sm transition-all", isActive ? "bg-primary text-black" : "text-black hover:bg-primary/20")}>
+                  <Icon size={16} /> {tab.label}
                 </button>
               );
             })}
-            
-            <button
-              onClick={() => setShowPinSection(!showPinSection)}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-lg font-black text-sm transition-all ml-auto",
-                showPinSection
-                  ? "bg-amber-500 text-black"
-                  : "text-black font-black hover:bg-amber-100"
-              )}
-            >
-              <KeyRound size={16} />
-              PIN Autorización
+            <button onClick={() => setShowPinSection(!showPinSection)} className={cn("flex items-center gap-2 px-4 py-2 rounded-lg font-black text-sm transition-all ml-auto", showPinSection ? "bg-amber-500 text-black" : "text-black font-black hover:bg-amber-100")}>
+              <KeyRound size={16} /> PIN Autorización
             </button>
           </div>
-          
           {showPinSection && (
             <div className="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Lock size={16} className="text-amber-600" />
-                <h3 className="text-sm font-black text-amber-800 uppercase">Código de Autorización</h3>
-              </div>
-              <p className="text-xs font-black text-amber-900 mb-3 uppercase">
-                Este PIN de 6 dígitos será requerido para autorizar ajustes de inventario y transacciones de colaboración/consumo propio.
-              </p>
+              <div className="flex items-center gap-2 mb-3"><Lock size={16} className="text-amber-600" /><h3 className="text-sm font-black text-amber-800 uppercase">Código de Autorización</h3></div>
+              <p className="text-xs font-black text-amber-900 mb-3 uppercase">Este PIN de 6 dígitos es requerido para ajustes de inventario y otras operaciones sensibles.</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
                 <div>
                   <label className="text-[11px] font-black uppercase text-amber-900 block mb-1">Nuevo PIN (6 dígitos)</label>
-                  <Input 
-                    type="password"
-                    maxLength={6}
-                    value={newAdminPin}
-                    onChange={(e) => setNewAdminPin(e.target.value.replace(/\D/g, ''))}
-                    className="h-8 text-sm font-mono text-center bg-white font-black"
-                    placeholder="••••••"
-                  />
+                  <Input type="password" maxLength={6} value={newAdminPin} onChange={(e) => setNewAdminPin(e.target.value.replace(/\D/g, ''))} className="h-8 text-sm font-mono text-center bg-white font-black" placeholder="••••••" />
                 </div>
                 <div>
                   <label className="text-[11px] font-black uppercase text-amber-900 block mb-1">Confirmar PIN</label>
-                  <Input 
-                    type="password"
-                    maxLength={6}
-                    value={confirmAdminPin}
-                    onChange={(e) => setConfirmAdminPin(e.target.value.replace(/\D/g, ''))}
-                    className="h-8 text-sm font-mono text-center bg-white font-black"
-                    placeholder="••••••"
-                  />
+                  <Input type="password" maxLength={6} value={confirmAdminPin} onChange={(e) => setConfirmAdminPin(e.target.value.replace(/\D/g, ''))} className="h-8 text-sm font-mono text-center bg-white font-black" placeholder="••••••" />
                 </div>
                 <div>
-                  <Button
-                    onClick={handleUpdateAdminPin}
-                    disabled={isUpdatingPin}
-                    className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black h-8 text-xs"
-                  >
-                    <Save size={12} className="mr-1" />
-                    Guardar PIN
+                  <Button onClick={handleUpdateAdminPin} disabled={isUpdatingPin} className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black h-8 text-xs">
+                    <Save size={12} className="mr-1" /> Guardar PIN
                   </Button>
                 </div>
               </div>
-              {adminPin && (
-                <p className="text-[10px] font-black text-amber-800 mt-2">
-                  PIN actual: {maskPin(adminPin)}
-                </p>
-              )}
+              {adminPin && <p className="text-[10px] font-black text-amber-800 mt-2">PIN actual: {maskPin(adminPin)}</p>}
             </div>
           )}
         </div>
@@ -473,46 +349,31 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
         {activeTab === 'dashboard' && (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
-              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-                <p className="text-xs font-black text-black uppercase tracking-widest">Productos</p>
-                <p className="text-2xl font-black text-black mt-1">{totalProducts}</p>
-              </div>
-              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-                <p className="text-xs font-black text-black uppercase tracking-widest">Clientes</p>
-                <p className="text-2xl font-black text-black mt-1">{totalClients}</p>
-              </div>
-              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-                <p className="text-xs font-black text-black uppercase tracking-widest">Ventas</p>
-                <p className="text-2xl font-black text-black mt-1">{totalSales}</p>
-              </div>
+              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm"><p className="text-xs font-black text-black uppercase tracking-widest">Productos</p><p className="text-2xl font-black text-black mt-1">{totalProducts}</p></div>
+              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm"><p className="text-xs font-black text-black uppercase tracking-widest">Clientes</p><p className="text-2xl font-black text-black mt-1">{totalClients}</p></div>
+              <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm"><p className="text-xs font-black text-black uppercase tracking-widest">Ventas</p><p className="text-2xl font-black text-black mt-1">{totalSales}</p></div>
               <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
                 <p className="text-xs font-black text-black uppercase tracking-widest">Ingresos del Mes</p>
-                <p className="text-2xl font-black text-green-600 mt-1">{formatUsd(monthlyRevenue)}</p>
-                <p className="text-[10px] font-black text-black uppercase mt-1">Reinicia cada 1ro del mes</p>
+                <p className="text-2xl font-black text-green-600 mt-1">{formatUsd(monthlyMetrics.monthlyRevenue)}</p>
+                <p className="text-[10px] font-black text-black uppercase mt-1">Ventas de contado y abonos</p>
               </div>
               <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
                 <p className="text-xs font-black text-black uppercase tracking-widest">Gastos del Mes</p>
-                <p className="text-2xl font-black text-red-600 mt-1">{formatUsd(monthlyExpenses)}</p>
-                <p className="text-[10px] font-black text-black uppercase mt-1">Compras pagadas en el mes</p>
+                <p className="text-2xl font-black text-red-600 mt-1">{formatUsd(monthlyMetrics.monthlyExpenses)}</p>
+                <p className="text-[10px] font-black text-black uppercase mt-1">Pagos a proveedores</p>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
               <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-                <div className="flex items-center gap-2 mb-2">
-                  <CreditCard size={18} className="text-orange-500" />
-                  <p className="text-sm font-black text-black uppercase tracking-widest">Cuentas por Cobrar</p>
-                </div>
+                <div className="flex items-center gap-2 mb-2"><CreditCard size={18} className="text-orange-500" /><p className="text-sm font-black text-black uppercase tracking-widest">Cuentas por Cobrar</p></div>
                 <p className="text-2xl font-black text-red-600">{formatUsd(totalCreditUsd)}</p>
-                <p className="text-[10px] font-black text-black uppercase mt-1">Total de créditos pendientes de clientes</p>
+                <p className="text-[10px] font-black text-black uppercase mt-1">Total de créditos pendientes</p>
               </div>
               <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-                <div className="flex items-center gap-2 mb-2">
-                  <Truck size={18} className="text-blue-500" />
-                  <p className="text-sm font-black text-black uppercase tracking-widest">Cuentas por Pagar</p>
-                </div>
+                <div className="flex items-center gap-2 mb-2"><Truck size={18} className="text-blue-500" /><p className="text-sm font-black text-black uppercase tracking-widest">Cuentas por Pagar</p></div>
                 <p className="text-2xl font-black text-red-600">{formatUsd(totalPayable)}</p>
-                <p className="text-[10px] font-black text-black uppercase mt-1">Total de facturas pendientes a proveedores</p>
+                <p className="text-[10px] font-black text-black uppercase mt-1">Total de facturas pendientes</p>
               </div>
             </div>
 
@@ -520,16 +381,8 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
               <div className="mb-6">
                 <h3 className="text-sm font-black uppercase tracking-widest text-black mb-3">⚠️ Alertas de Inventario</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {outOfStock > 0 && (
-                    <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-                      <p className="text-xs font-black text-red-900 uppercase">Productos Agotados: {outOfStock}</p>
-                    </div>
-                  )}
-                  {lowStock > 0 && (
-                    <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
-                      <p className="text-xs font-black text-yellow-900 uppercase">Stock Mínimo: {lowStock}</p>
-                    </div>
-                  )}
+                  {outOfStock > 0 && <div className="bg-red-50 border border-red-200 rounded-xl p-4"><p className="text-xs font-black text-red-900 uppercase">Productos Agotados: {outOfStock}</p></div>}
+                  {lowStock > 0 && <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4"><p className="text-xs font-black text-yellow-900 uppercase">Stock Mínimo: {lowStock}</p></div>}
                 </div>
               </div>
             )}
@@ -546,79 +399,25 @@ export default function AdminDashboard({ state }: AdminDashboardProps) {
         <DialogContent className="bg-white max-w-md p-0 rounded-xl">
           <DialogHeader className="bg-red-600 p-4 text-white rounded-t-xl">
             <div className="flex justify-between items-center">
-              <DialogTitle className="text-base font-black flex items-center gap-2">
-                <AlertTriangle size={18} /> RESET TOTAL DEL SISTEMA
-              </DialogTitle>
-              <button onClick={() => setShowResetModal(false)} className="text-white hover:text-white">
-                <XCircle size={20} />
-              </button>
+              <DialogTitle className="text-base font-black flex items-center gap-2"><AlertTriangle size={18} /> RESET TOTAL DEL SISTEMA</DialogTitle>
+              <button onClick={() => setShowResetModal(false)} className="text-white hover:text-white"><XCircle size={20} /></button>
             </div>
           </DialogHeader>
-          
           <div className="p-5">
             <div className="bg-red-50 border-2 border-red-300 rounded-lg p-4 mb-5">
               <p className="text-red-900 font-black text-sm mb-2">⚠️ ¡ADVERTENCIA!</p>
-              <p className="text-red-800 font-black text-xs">
-                Esta acción ELIMINARÁ PERMANENTEMENTE los siguientes datos:
-              </p>
-              <ul className="text-red-800 font-black text-xs mt-2 space-y-1 list-disc list-inside">
-                <li>Productos, clientes, transacciones, cuentas por cobrar</li>
-                <li>Facturas de compra, proveedores, pagos a proveedores</li>
-                <li>Kardex, entradas contables, historial de cierres</li>
-                <li>Cajas, registros y sesiones de terminal</li>
-              </ul>
-              <p className="text-red-900 font-black text-sm mt-3">
-                ✅ Los USUARIOS y el PIN actual se conservarán.
-              </p>
-              <p className="text-red-900 font-black text-sm mt-2">
-                Esta operación es IRREVERSIBLE.
-              </p>
+              <p className="text-red-800 font-black text-xs">Esta acción ELIMINARÁ PERMANENTEMENTE los datos de transacciones, inventario, clientes y configuraciones.</p>
+              <p className="text-red-900 font-black text-sm mt-3">✅ Los USUARIOS y el PIN actual se conservarán.</p>
+              <p className="text-red-900 font-black text-sm mt-2">Esta operación es IRREVERSIBLE.</p>
             </div>
-            
             <div className="mb-4">
-              <label className="text-[11px] font-black uppercase text-black block mb-2">
-                Ingrese el PIN de autorización para continuar
-              </label>
-              <Input 
-                type="password"
-                maxLength={6}
-                value={resetPinInput}
-                onChange={(e) => setResetPinInput(e.target.value.replace(/\D/g, ''))}
-                className="h-10 text-lg font-mono text-center bg-gray-50 border-gray-400 font-black"
-                placeholder="••••••"
-                autoFocus
-                onKeyPress={(e) => {
-                  if (e.key === 'Enter' && resetPinInput.length === 6) {
-                    handleResetSystem();
-                  }
-                }}
-              />
+              <label className="text-[11px] font-black uppercase text-black block mb-2">Ingrese el PIN de autorización para continuar</label>
+              <Input type="password" maxLength={6} value={resetPinInput} onChange={(e) => setResetPinInput(e.target.value.replace(/\D/g, ''))} className="h-10 text-lg font-mono text-center bg-gray-50 border-gray-400 font-black" placeholder="••••••" autoFocus onKeyPress={(e) => { if (e.key === 'Enter') handleResetSystem(); }} />
             </div>
-            
             <div className="flex gap-3">
-              <Button
-                onClick={() => setShowResetModal(false)}
-                variant="outline"
-                className="flex-1 h-10 border-gray-400 text-black font-black"
-              >
-                Cancelar
-              </Button>
-              <Button
-                onClick={handleResetSystem}
-                disabled={isResetting || resetPinInput.length !== 6}
-                className="flex-1 h-10 bg-red-600 hover:bg-red-700 text-white font-black"
-              >
-                {isResetting ? (
-                  <>
-                    <RefreshCw size={14} className="mr-1 animate-spin" />
-                    Resetear...
-                  </>
-                ) : (
-                  <>
-                    <Trash2 size={14} className="mr-1" />
-                    CONFIRMAR RESET
-                  </>
-                )}
+              <Button onClick={() => setShowResetModal(false)} variant="outline" className="flex-1 h-10 border-gray-400 text-black font-black">Cancelar</Button>
+              <Button onClick={handleResetSystem} disabled={isResetting || resetPinInput.length !== 6} className="flex-1 h-10 bg-red-600 hover:bg-red-700 text-white font-black">
+                {isResetting ? <><RefreshCw size={14} className="mr-1 animate-spin" /> Reseteando...</> : <><Trash2 size={14} className="mr-1" /> CONFIRMAR RESET</>}
               </Button>
             </div>
           </div>

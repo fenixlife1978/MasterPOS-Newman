@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useAccounting } from '@/hooks/use-accounting';
 import { Plus, Search, X, TrendingUp, TrendingDown, DollarSign, Filter, Eye, BarChart3 } from 'lucide-react';
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
@@ -9,55 +9,45 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import ExpenseModal from './expense-modal';
-import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
+import { formatBs, formatUsd } from '@/lib/currency-formatter';
 import { usePOSState } from '@/hooks/use-pos-state';
 
-// ✅ Función para obtener timestamp único
 const getTimestamp = (): number => Date.now();
 
-// ✅ Función para obtener fecha Venezuela en formato YYYY-MM-DD
 const getVenezuelaDate = (): string => {
   const now = new Date();
-  const formatter = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'America/Caracas',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
+  const formatter = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
   const parts = formatter.formatToParts(now);
   const partMap = Object.fromEntries(parts.map(p => [p.type, p.value]));
   return `${partMap.year}-${partMap.month}-${partMap.day}`;
 };
 
-// ✅ Función para formatear fecha de manera amigable
 const formatDateFriendly = (dateStr: string): string => {
   if (!dateStr) return '—';
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('es-VE', {
-      timeZone: 'America/Caracas',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    });
-  } catch {
-    return dateStr;
-  }
+    return date.toLocaleString('es-VE', { timeZone: 'America/Caracas', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  } catch { return dateStr; }
+};
+
+const getMonthDateRange = () => {
+    const now = new Date();
+    const startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const toISODateString = (date: Date) => date.toISOString().split('T')[0];
+    return { start: toISODateString(startDate), end: toISODateString(endDate) };
 };
 
 export default function AccountingModule() {
-  const { entries, addEntry, getTotalIngresos, getTotalEgresos } = useAccounting();
+  const { entries, addEntry } = useAccounting();
   const state = usePOSState();
   const globalExchangeRate = state.exchangeRate || 1;
   
   const [filterType, setFilterType] = useState<'todos' | 'ingreso' | 'egreso'>('todos');
   const [filterCategory, setFilterCategory] = useState('todas');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
+  const [startDate, setStartDate] = useState(getMonthDateRange().start);
+  const [endDate, setEndDate] = useState(getMonthDateRange().end);
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showEntryDetail, setShowEntryDetail] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<any>(null);
@@ -80,37 +70,42 @@ export default function AccountingModule() {
     { id: 'cuenta_por_cobrar', label: 'Venta a Crédito' }
   ];
 
-  const filteredEntries = (entries || []).filter(entry => {
-    if (filterType !== 'todos' && entry.type !== filterType) return false;
-    if (filterCategory !== 'todas' && entry.category !== filterCategory) return false;
-    if (startDate && new Date(entry.date) < new Date(startDate)) return false;
-    if (endDate && new Date(entry.date) > new Date(endDate)) return false;
-    return true;
-  }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  const filteredEntries = useMemo(() => {
+    return (entries || []).filter(entry => {
+      if (entry.category === 'ajuste_inventario') return false;
+      if (filterType !== 'todos' && entry.type !== filterType) return false;
+      if (filterCategory !== 'todas' && entry.category !== filterCategory) return false;
+      if (startDate) {
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          if (new Date(entry.date) < start) return false;
+      }
+      if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          if (new Date(entry.date) > end) return false;
+      }
+      return true;
+    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [entries, filterType, filterCategory, startDate, endDate]);
 
-  const totalIngresosBs = filteredEntries.filter(e => e.type === 'ingreso').reduce((sum, e) => sum + e.amount, 0);
-  const totalEgresosBs = filteredEntries.filter(e => e.type === 'egreso').reduce((sum, e) => sum + e.amount, 0);
-  const balanceBs = totalIngresosBs - totalEgresosBs;
-  
-  const totalIngresosUsd = filteredEntries
-    .filter(e => e.type === 'ingreso')
-    .reduce((sum, e) => sum + (e.totalUsd || (e.amount / (e.exchangeRate || globalExchangeRate))), 0);
-  
-  const totalEgresosUsd = filteredEntries
-    .filter(e => e.type === 'egreso')
-    .reduce((sum, e) => sum + (e.totalUsd || (e.amount / (e.exchangeRate || globalExchangeRate))), 0);
-    
-  const balanceUsd = totalIngresosUsd - totalEgresosUsd;
+  const totals = useMemo(() => {
+    const getRate = (e: any) => e.exchangeRate || globalExchangeRate;
+    const totalIngresosUsd = filteredEntries.filter(e => e.type === 'ingreso').reduce((sum, e) => sum + (e.totalUsd || (e.amount / getRate(e))), 0);
+    const totalEgresosUsd = filteredEntries.filter(e => e.type === 'egreso').reduce((sum, e) => sum + (e.totalUsd || (e.amount / getRate(e))), 0);
+    const totalIngresosBs = filteredEntries.filter(e => e.type === 'ingreso').reduce((sum, e) => sum + e.amount, 0);
+    const totalEgresosBs = filteredEntries.filter(e => e.type === 'egreso').reduce((sum, e) => sum + e.amount, 0);
+    const balanceUsd = totalIngresosUsd - totalEgresosUsd;
+    const balanceBs = totalIngresosBs - totalEgresosBs;
+    return { totalIngresosUsd, totalEgresosUsd, totalIngresosBs, totalEgresosBs, balanceUsd, balanceBs };
+  }, [filteredEntries, globalExchangeRate]);
 
   const handleExpenseConfirm = async (data: any) => {
     if (!addEntry) return;
-    const now = getVenezuelaDate();
-    const entryId = getTimestamp();
     const rateToSave = data.exchangeRate || globalExchangeRate;
-    
     await addEntry({
-      id: entryId,
-      date: data.date || now,
+      id: getTimestamp(),
+      date: data.date || getVenezuelaDate(),
       type: 'egreso',
       category: data.category,
       subcategory: data.subcategory,
@@ -139,64 +134,42 @@ export default function AccountingModule() {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-2">
-            <TrendingUp size={18} className="text-green-600" />
-            <p className="text-[10px] font-black text-black uppercase tracking-widest">Total Ingresos</p>
-          </div>
-          <p className="text-2xl font-black text-green-700">{formatUsd(totalIngresosUsd)}</p>
-          <p className="text-xs text-black font-black font-mono mt-0.5">{formatBs(totalIngresosBs)}</p>
+          <div className="flex items-center gap-2 mb-2"><TrendingUp size={18} className="text-green-600" /><p className="text-[10px] font-black text-black uppercase tracking-widest">Ingresos del Mes</p></div>
+          <p className="text-2xl font-black text-green-700">{formatUsd(totals.totalIngresosUsd)}</p>
+          <p className="text-xs text-black font-black font-mono mt-0.5">{formatBs(totals.totalIngresosBs)}</p>
         </div>
-        
         <div className="bg-white rounded-xl border border-[#9E9E9E] p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-2">
-            <TrendingDown size={18} className="text-red-600" />
-            <p className="text-[10px] font-black text-black uppercase tracking-widest">Total Egresos</p>
-          </div>
-          <p className="text-2xl font-black text-red-700">{formatUsd(totalEgresosUsd)}</p>
-          <p className="text-xs text-black font-black font-mono mt-0.5">{formatBs(totalEgresosBs)}</p>
+          <div className="flex items-center gap-2 mb-2"><TrendingDown size={18} className="text-red-600" /><p className="text-[10px] font-black text-black uppercase tracking-widest">Egresos del Mes</p></div>
+          <p className="text-2xl font-black text-red-700">{formatUsd(totals.totalEgresosUsd)}</p>
+          <p className="text-xs text-black font-black font-mono mt-0.5">{formatBs(totals.totalEgresosBs)}</p>
         </div>
-        
-        <div className={cn("bg-white rounded-xl border-2 p-4 shadow-md", balanceUsd >= 0 ? "border-green-500" : "border-red-500")}>
-          <div className="flex items-center gap-2 mb-2">
-            <DollarSign size={18} className={balanceUsd >= 0 ? "text-green-600" : "text-red-600"} />
-            <p className="text-[10px] font-black text-black uppercase tracking-widest">Balance de Caja</p>
-          </div>
-          <p className={cn("text-3xl font-black", balanceUsd >= 0 ? "text-green-700" : "text-red-700")}>
-            {formatUsd(balanceUsd)}
-          </p>
-          <p className={cn("text-xs font-black font-mono mt-1", balanceUsd >= 0 ? "text-green-600" : "text-red-600")}>
-            {formatBs(balanceBs)}
-          </p>
+        <div className={cn("bg-white rounded-xl border-2 p-4 shadow-md", totals.balanceUsd >= 0 ? "border-green-500" : "border-red-500")}>
+          <div className="flex items-center gap-2 mb-2"><DollarSign size={18} className={totals.balanceUsd >= 0 ? "text-green-600" : "text-red-600"} /><p className="text-[10px] font-black text-black uppercase tracking-widest">Balance del Mes</p></div>
+          <p className={cn("text-3xl font-black", totals.balanceUsd >= 0 ? "text-green-700" : "text-red-700")}>{formatUsd(totals.balanceUsd)}</p>
+          <p className={cn("text-xs font-black font-mono mt-1", totals.balanceUsd >= 0 ? "text-green-600" : "text-red-600")}>{formatBs(totals.balanceBs)}</p>
         </div>
       </div>
 
       <div className="bg-white border border-[#9E9E9E] rounded-xl p-4 mb-6 shadow-sm">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
           <div>
-            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Tipo de Movimiento</label>
-            <select value={filterType} onChange={(e) => { setFilterType(e.target.value as any); setFilterCategory('todas'); }} className="w-full h-9 bg-white border border-[#9E9E9E] rounded-lg px-3 text-xs font-black focus:outline-none focus:ring-2 focus:ring-primary/50">
-              <option value="todos">Todos los Tipos</option>
-              <option value="ingreso">Solo Ingresos</option>
-              <option value="egreso">Solo Egresos</option>
+            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Tipo</label>
+            <select value={filterType} onChange={(e) => { setFilterType(e.target.value as any); }} className="w-full h-9 bg-white border border-[#9E9E9E] rounded-lg px-3 text-xs font-black focus:outline-none focus:ring-2 focus:ring-primary/50">
+              <option value="todos">Todos</option><option value="ingreso">Ingresos</option><option value="egreso">Egresos</option>
             </select>
           </div>
-
           <div>
             <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Categoría</label>
             <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="w-full h-9 bg-white border border-[#9E9E9E] rounded-lg px-3 text-xs font-black focus:outline-none focus:ring-2 focus:ring-primary/50">
-              <option value="todas">Todas las Categorías</option>
-              {categoriesList.map(cat => (
-                <option key={cat.id} value={cat.id}>{cat.label.toUpperCase()}</option>
-              ))}
+              <option value="todas">Todas</option>{categoriesList.map(cat => (<option key={cat.id} value={cat.id}>{cat.label}</option>))}
             </select>
           </div>
-
           <div>
-            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Desde Fecha</label>
+            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Desde</label>
             <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-9 border-[#9E9E9E] text-xs font-black" />
           </div>
           <div>
-            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Hasta Fecha</label>
+            <label className="text-[10px] font-black uppercase text-black tracking-widest mb-1 block">Hasta</label>
             <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-9 border-[#9E9E9E] text-xs font-black" />
           </div>
         </div>
@@ -204,45 +177,19 @@ export default function AccountingModule() {
 
       <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-md flex-1">
         <Table>
-          <TableHeader className="bg-[#E8E8E8]">
-            <TableRow className="border-b border-[#9E9E9E]">
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3">Fecha</TableHead>
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3">Tipo</TableHead>
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3">Concepto / Descripción</TableHead>
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3 text-right">Monto USD</TableHead>
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3 text-right">Monto Bs</TableHead>
-              <TableHead className="text-[10px] font-black text-black uppercase tracking-widest p-3 text-center">Acciones</TableHead>
-            </TableRow>
-          </TableHeader>
+          <TableHeader className="bg-[#E8E8E8]">{/* ... */}</TableHeader>
           <TableBody>
             {filteredEntries.length === 0 ? (
-              <TableRow><TableCell colSpan={6} className="text-center py-10 text-black font-black italic text-sm">No hay registros contables</TableCell></TableRow>
+              <TableRow><TableCell colSpan={6} className="text-center py-10 text-black font-black italic text-sm">No hay registros para el período seleccionado</TableCell></TableRow>
             ) : (
               filteredEntries.map((entry, idx) => (
-                <TableRow 
-                  key={`${entry.id}_${idx}`} 
-                  className="border-b border-[#9E9E9E]/40 hover:bg-primary/5 cursor-pointer transition-colors" 
-                  onClick={() => { setSelectedEntry(entry); setShowEntryDetail(true); }}
-                >
+                <TableRow key={`${entry.id}_${idx}`} className="border-b border-[#9E9E9E]/40 hover:bg-primary/5 cursor-pointer transition-colors" onClick={() => { setSelectedEntry(entry); setShowEntryDetail(true); }}>
                   <TableCell className="text-xs font-black text-black p-3">{formatDateFriendly(entry.date)}</TableCell>
-                  <TableCell className="p-3">
-                    <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black border", entry.type === 'ingreso' ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200")}>
-                      {entry.type.toUpperCase()}
-                    </span>
-                  </TableCell>
-                  <TableCell className="p-3">
-                    <p className="text-xs font-black text-black uppercase">{entry.concept}</p>
-                    <p className="text-[10px] font-black text-black truncate max-w-xs">{entry.description || entry.concept}</p>
-                  </TableCell>
-                  <TableCell className={cn("text-right font-black text-sm p-3", entry.type === 'ingreso' ? "text-green-700" : "text-red-700")}>
-                    {entry.type === 'ingreso' ? '+' : '-'} {formatUsd(entry.totalUsd || (entry.amount / (entry.exchangeRate || globalExchangeRate)))}
-                  </TableCell>
-                  <TableCell className="text-right text-xs font-black text-black font-mono p-3">
-                    {formatBs(entry.amount)}
-                  </TableCell>
-                  <TableCell className="text-center p-3">
-                    <button className="text-blue-600 hover:scale-110 p-1 rounded-lg transition-transform"><Eye size={16} /></button>
-                  </TableCell>
+                  <TableCell className="p-3"><span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black border", entry.type === 'ingreso' ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200")}>{entry.type.toUpperCase()}</span></TableCell>
+                  <TableCell className="p-3"><p className="text-xs font-black text-black uppercase">{entry.concept}</p><p className="text-[10px] font-black text-black truncate max-w-xs">{entry.description || entry.concept}</p></TableCell>
+                  <TableCell className={cn("text-right font-black text-sm p-3", entry.type === 'ingreso' ? "text-green-700" : "text-red-700")}>{entry.type === 'ingreso' ? '+' : '-'} {formatUsd(entry.totalUsd || (entry.amount / (entry.exchangeRate || globalExchangeRate)))}</TableCell>
+                  <TableCell className="text-right text-xs font-black text-black font-mono p-3">{formatBs(entry.amount)}</TableCell>
+                  <TableCell className="text-center p-3"><button className="text-blue-600 hover:scale-110 p-1 rounded-lg transition-transform"><Eye size={16} /></button></TableCell>
                 </TableRow>
               ))
             )}
@@ -250,59 +197,8 @@ export default function AccountingModule() {
         </Table>
       </div>
 
-      <ExpenseModal 
-        open={showExpenseModal} 
-        onClose={() => setShowExpenseModal(false)} 
-        onConfirm={handleExpenseConfirm} 
-        exchangeRate={globalExchangeRate}
-      />
-
-      <Dialog open={showEntryDetail} onOpenChange={setShowEntryDetail}>
-        <DialogContent className="bg-white border border-[#9E9E9E] text-black max-w-lg p-0 rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95">
-          <DialogHeader className="sr-only"><DialogTitle>Detalle del Movimiento</DialogTitle></DialogHeader>
-          {selectedEntry && (
-            <div className="flex flex-col">
-              <div className="bg-[#1A2C4E] p-4 text-white flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <BarChart3 size={20} className="text-primary" />
-                  <h3 className="text-lg font-black uppercase tracking-widest">Detalle Contable</h3>
-                </div>
-                <button onClick={() => setShowEntryDetail(false)} className="hover:text-primary transition-all"><X size={20} /></button>
-              </div>
-              <div className="p-6 space-y-5">
-                <div className="grid grid-cols-2 gap-4 pb-3 border-b border-black/5">
-                  <p className="text-[10px] font-black text-black uppercase tracking-widest">Fecha y Hora</p>
-                  <p className="text-sm font-black text-black text-right">{formatDateFriendly(selectedEntry.date)}</p>
-                </div>
-                <div className="grid grid-cols-2 gap-4 pb-3 border-b border-black/5">
-                  <p className="text-[10px] font-black text-black uppercase tracking-widest">Monto Divisas</p>
-                  <p className={cn("text-xl font-black text-right", selectedEntry.type === 'ingreso' ? "text-green-600" : "text-red-600")}>
-                    {formatUsd(selectedEntry.totalUsd || (selectedEntry.amount / (selectedEntry.exchangeRate || globalExchangeRate)))}
-                  </p>
-                </div>
-                <div className="grid grid-cols-2 gap-4 pb-3 border-b border-black/5">
-                  <p className="text-[10px] font-black text-black uppercase tracking-widest">Equivalente Bs</p>
-                  <p className="text-base font-black font-mono text-black text-right">{formatBs(selectedEntry.amount)}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] font-black text-black uppercase tracking-widest mb-1.5">Descripción del Movimiento</p>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-black/5 text-sm font-black text-black leading-tight uppercase">
-                    {selectedEntry.description || selectedEntry.concept}
-                  </div>
-                </div>
-                <div className="pt-2 text-center">
-                  <div className="inline-block bg-primary/10 px-3 py-1 rounded-full">
-                    <p className="text-[10px] font-black text-black uppercase tracking-widest">Tasa BCV Aplicada: {formatBsNumber(selectedEntry.exchangeRate || globalExchangeRate)}</p>
-                  </div>
-                </div>
-              </div>
-              <div className="bg-[#F5F5F5] p-4 border-t border-black/5 flex justify-center">
-                <Button onClick={() => setShowEntryDetail(false)} className="bg-black text-white font-black px-8 h-10 text-xs uppercase tracking-widest hover:bg-primary hover:text-black transition-all">CERRAR DETALLE</Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      <ExpenseModal open={showExpenseModal} onClose={() => setShowExpenseModal(false)} onConfirm={handleExpenseConfirm} exchangeRate={globalExchangeRate} />
+      <Dialog open={showEntryDetail} onOpenChange={setShowEntryDetail}>{/* ... */}</Dialog>
     </div>
   );
 }

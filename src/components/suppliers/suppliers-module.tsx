@@ -53,20 +53,25 @@ export default function SuppliersModule() {
 
   const filteredInvoices = useMemo(() => {
     return invoices.filter(inv => {
+      const supplier = suppliers.find(s => s.id === inv.supplierId);
+      const supplierName = supplier ? supplier.name : (inv.supplierName || '');
+      
       const matchSearch = inv.invoiceNumber?.toLowerCase().includes(search.toLowerCase()) || 
-                          inv.supplierName?.toLowerCase().includes(search.toLowerCase());
+                          supplierName.toLowerCase().includes(search.toLowerCase());
       const matchSupplier = filterSupplier === 'all' || String(inv.supplierId) === filterSupplier;
       const matchStatus = filterStatus === 'all' || inv.status === filterStatus;
       return matchSearch && matchSupplier && matchStatus;
     }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [invoices, search, filterSupplier, filterStatus]);
+  }, [invoices, suppliers, search, filterSupplier, filterStatus]);
 
   const filteredPayments = useMemo(() => {
-    return payments.filter(p => 
-      p.supplierName?.toLowerCase().includes(search.toLowerCase()) ||
-      p.reference?.toLowerCase().includes(search.toLowerCase())
-    ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [payments, search]);
+    return payments.filter(p => {
+      const supplier = suppliers.find(s => s.id === p.supplierId);
+      const supplierName = supplier ? supplier.name : (p.supplierName || '');
+      return supplierName.toLowerCase().includes(search.toLowerCase()) ||
+             (p.reference || '').toLowerCase().includes(search.toLowerCase());
+    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [payments, suppliers, search]);
 
   const handleSaveSupplier = async () => {
     if (!supplierForm.name) return alert('El nombre es requerido');
@@ -227,13 +232,14 @@ export default function SuppliersModule() {
               ) : (
                 filteredInvoices.map(inv => {
                   const pending = inv.total - (inv.paidAmount || 0);
+                  const supplier = suppliers.find(s => s.id === inv.supplierId);
                   return (
                     <TableRow key={inv.id} className="hover:bg-primary/5">
                       <TableCell className="font-bold text-xs">#{inv.invoiceNumber || inv.id}</TableCell>
-                      <TableCell className="font-bold text-xs uppercase">{inv.supplierName || '—'}</TableCell>
-                      <TableCell className="text-xs text-black font-black">{new Date(inv.date).toLocaleDateString('es-VE')}</TableCell>
+                      <TableCell className="font-bold text-xs uppercase">{supplier?.name || inv.supplierName || '—'}</TableCell>
+                      <TableCell className="text-xs text-black font-black">{new Date(inv.date).toLocaleDateString('es-VE', { timeZone: 'America/Caracas' })}</TableCell>
                       <TableCell className="text-right font-bold">{formatUsd(inv.total)}</TableCell>
-                      <TableCell className="text-right font-black text-red-600">{formatUsd(pending)}</TableCell>
+                      <TableCell className={cn("text-right font-black", pending > 0 ? "text-red-600" : "text-green-600")}>{formatUsd(pending)}</TableCell>
                       <TableCell className="text-center">
                         <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black border", 
                           inv.status === 'pagada' ? "bg-green-100 text-green-700 border-green-200" : 
@@ -273,18 +279,21 @@ export default function SuppliersModule() {
               {filteredPayments.length === 0 ? (
                 <TableRow><TableCell colSpan={5} className="text-center py-10 text-black font-black italic">No hay pagos registrados</TableCell></TableRow>
               ) : (
-                filteredPayments.map(p => (
-                  <TableRow key={p.id} className="hover:bg-primary/5">
-                    <TableCell className="text-xs text-black font-black">{new Date(p.date).toLocaleString('es-VE')}</TableCell>
-                    <TableCell className="font-bold text-xs uppercase">{p.supplierName}</TableCell>
-                    <TableCell>
-                      <p className="text-xs font-bold uppercase">{p.method.replace('_', ' ')}</p>
-                      <p className="text-[10px] text-black font-black">{p.reference || '—'} {p.bank ? `(${p.bank})` : ''}</p>
-                    </TableCell>
-                    <TableCell className="text-right font-black text-green-600">{formatUsd(p.amount)}</TableCell>
-                    <TableCell className="text-right font-mono text-xs text-black font-black">{formatBs(p.amount * (p.exchangeRate || exchangeRate))}</TableCell>
-                  </TableRow>
-                ))
+                filteredPayments.map(p => {
+                  const supplier = suppliers.find(s => s.id === p.supplierId);
+                  return (
+                    <TableRow key={p.id} className="hover:bg-primary/5">
+                      <TableCell className="text-xs text-black font-black">{new Date(p.date).toLocaleString('es-VE', { timeZone: 'America/Caracas' })}</TableCell>
+                      <TableCell className="font-bold text-xs uppercase">{supplier?.name || p.supplierName || '—'}</TableCell>
+                      <TableCell>
+                        <p className="text-xs font-bold uppercase">{p.method.replace('_', ' ')}</p>
+                        <p className="text-[10px] text-black font-black">{p.reference || '—'} {p.bank ? `(${p.bank})` : ''}</p>
+                      </TableCell>
+                      <TableCell className="text-right font-black text-green-600">{formatUsd(p.amount)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-black font-black">{formatBs(p.amount * (p.exchangeRate || exchangeRate))}</TableCell>
+                    </TableRow>
+                  );
+                })
               )}
             </TableBody>
           </Table>
