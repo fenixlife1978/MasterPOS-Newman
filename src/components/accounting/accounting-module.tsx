@@ -183,13 +183,13 @@ export default function AccountingModule() {
               <TableRow><TableCell colSpan={6} className="text-center py-10 text-black font-black italic text-sm">No hay registros para el período seleccionado</TableCell></TableRow>
             ) : (
               filteredEntries.map((entry, idx) => (
-                <TableRow key={`${entry.id}_${idx}`} className="border-b border-[#9E9E9E]/40 hover:bg-primary/5 cursor-pointer transition-colors" onClick={() => { setSelectedEntry(entry); setShowEntryDetail(true); }}>
+                <TableRow key={`${entry.id}_${idx}`} className="border-b border-[#9E9E9E]/40 hover:bg-primary/5 transition-colors">
                   <TableCell className="text-xs font-black text-black p-3">{formatDateFriendly(entry.date)}</TableCell>
                   <TableCell className="p-3"><span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black border", entry.type === 'ingreso' ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200")}>{entry.type.toUpperCase()}</span></TableCell>
                   <TableCell className="p-3"><p className="text-xs font-black text-black uppercase">{entry.concept}</p><p className="text-[10px] font-black text-black truncate max-w-xs">{entry.description || entry.concept}</p></TableCell>
                   <TableCell className={cn("text-right font-black text-sm p-3", entry.type === 'ingreso' ? "text-green-700" : "text-red-700")}>{entry.type === 'ingreso' ? '+' : '-'} {formatUsd(entry.totalUsd || (entry.amount / (entry.exchangeRate || globalExchangeRate)))}</TableCell>
                   <TableCell className="text-right text-xs font-black text-black font-mono p-3">{formatBs(entry.amount)}</TableCell>
-                  <TableCell className="text-center p-3"><button className="text-blue-600 hover:scale-110 p-1 rounded-lg transition-transform"><Eye size={16} /></button></TableCell>
+                  <TableCell className="text-center p-3"><button onClick={() => { setSelectedEntry(entry); setShowEntryDetail(true); }} className="text-blue-600 hover:scale-110 p-1 rounded-lg transition-transform"><Eye size={16} /></button></TableCell>
                 </TableRow>
               ))
             )}
@@ -198,7 +198,59 @@ export default function AccountingModule() {
       </div>
 
       <ExpenseModal open={showExpenseModal} onClose={() => setShowExpenseModal(false)} onConfirm={handleExpenseConfirm} exchangeRate={globalExchangeRate} />
-      <Dialog open={showEntryDetail} onOpenChange={setShowEntryDetail}>{/* ... */}</Dialog>
+      
+      <Dialog open={showEntryDetail} onOpenChange={setShowEntryDetail}>
+        <DialogContent className="max-w-md bg-white p-6 rounded-2xl shadow-2xl">
+          <DialogHeader className="mb-4">
+            <DialogTitle className="text-2xl font-black font-headline text-black uppercase">Detalle del Movimiento</DialogTitle>
+          </DialogHeader>
+          {selectedEntry && (
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px]">Fecha:</span>
+                <span className="font-mono font-black text-black">{formatDateFriendly(selectedEntry.date)}</span>
+              </div>
+              <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px]">Tipo:</span>
+                <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black border", selectedEntry.type === 'ingreso' ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200")}>{selectedEntry.type.toUpperCase()}</span>
+              </div>
+              <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px]">Categoría:</span>
+                <span className="font-black text-black capitalize">{categoriesList.find(c => c.id === selectedEntry.category)?.label || selectedEntry.category.replace(/_/g, ' ')}</span>
+              </div>
+              <div className="flex flex-col border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px] mb-1">Concepto:</span>
+                <p className="font-black text-black text-xs">{selectedEntry.concept}</p>
+              </div>
+              {selectedEntry.description &&
+                <div className="flex flex-col border-b border-gray-200 pb-2">
+                  <span className="font-black text-black uppercase tracking-widest text-[10px] mb-1">Descripción:</span>
+                  <p className="font-black text-black text-xs">{selectedEntry.description}</p>
+                </div>
+              }
+              <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px]">Monto USD:</span>
+                <span className={cn("font-black text-lg", selectedEntry.type === 'ingreso' ? "text-green-600" : "text-red-600")}>
+                  {selectedEntry.type === 'ingreso' ? '+' : '-'} {formatUsd(selectedEntry.totalUsd || (selectedEntry.amount / (selectedEntry.exchangeRate || globalExchangeRate)))}
+                </span>
+              </div>
+              <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                <span className="font-black text-black uppercase tracking-widest text-[10px]">Monto Bs.:</span>
+                <span className="font-mono font-black text-black">{formatBs(selectedEntry.amount)}</span>
+              </div>
+              {selectedEntry.exchangeRate &&
+                <div className="flex justify-between items-center">
+                  <span className="font-black text-black uppercase tracking-widest text-[10px]">Tasa de Cambio:</span>
+                  <span className="font-mono font-black text-black">{formatBs(selectedEntry.exchangeRate)}</span>
+                </div>
+              }
+            </div>
+          )}
+          <div className="flex justify-end mt-6">
+            <Button onClick={() => setShowEntryDetail(false)} variant="outline" className="font-black">Cerrar</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

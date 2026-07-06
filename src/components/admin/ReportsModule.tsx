@@ -3,7 +3,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { usePOSState } from '@/hooks/use-pos-state';
 import { useAccounting } from '@/hooks/use-accounting';
-import { Calendar, FileText, FileSpreadsheet, Search, TrendingUp, TrendingDown, BarChart3, DollarSign, Printer, Share2, Download, Monitor, X } from 'lucide-react';
+import { Calendar, FileText, FileSpreadsheet, Search, TrendingUp, TrendingDown, BarChart3, DollarSign, Printer, Share2, Download, Monitor, X, Package } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -23,7 +23,7 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
   const [endDate, setEndDate] = useState('');
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
-  const [activeReport, setActiveReport] = useState<'transactions' | 'summary' | 'consolidated'>('transactions');
+  const [activeReport, setActiveReport] = useState<'transactions' | 'summary' | 'consolidated' | 'inventory'>('transactions');
   
   const [terminals, setTerminals] = useState<{ id: string; name: string }[]>([]);
   const [selectedTerminalId, setSelectedTerminalId] = useState<string>('all');
@@ -32,7 +32,6 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
   
   const reportContentRef = useRef<HTMLDivElement>(null);
 
-  // ✅ Cargar terminales desde FIREBASE
   useEffect(() => {
     const loadTerminals = async () => {
       setIsLoadingTerminals(true);
@@ -40,7 +39,6 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
       try {
         const terminalsData = await syncService.getAllTerminals();
         if (terminalsData && terminalsData.length > 0) {
-          // ✅ El ID del dropdown ahora es el NOMBRE legible para que coincida con el campo terminalId de las transacciones
           setTerminals(terminalsData.map((t: any) => ({ id: t.name || t.id, name: t.name || t.id })));
         } else {
           setLoadError('No se encontraron terminales registradas.');
@@ -58,6 +56,11 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
   }, []);
 
   const handleSearch = () => {
+    if (activeReport === 'inventory') {
+      setHasSearched(true);
+      return;
+    }
+
     if (!startDate || !endDate) {
       alert('Seleccione ambas fechas');
       return;
@@ -71,12 +74,9 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
       return txDate >= startLimit && txDate <= endLimit;
     });
     
-    // ✅ Filtrar por terminal (usando el nombre guardado en terminalId)
     if (selectedTerminalId !== 'all') {
       filtered = filtered.filter(t => {
-        // Coincidencia directa por el nombre (guardado ahora en terminalId)
         if (t.terminalId) return t.terminalId === selectedTerminalId;
-        // Fallback por sesión
         if (t.sessionId) {
           const parts = t.sessionId.split('_');
           const terminalFromSession = parts[0];
@@ -89,6 +89,40 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
     setFilteredTransactions(filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
     setHasSearched(true);
   };
+  
+  const inventoryReportData = useMemo(() => {
+    if (activeReport !== 'inventory') return null;
+
+    const productMap = new Map<string, { totalCost: number; totalQuantity: number; product: any }>();
+
+    state.products.forEach(p => {
+      const cost = p.costUsd || 0;
+      const stock = p.stock || 0;
+
+      if(p.id) {
+          productMap.set(p.id.toString(), {
+              totalCost: cost * stock,
+              totalQuantity: stock,
+              product: p,
+          });
+      }
+    });
+
+    const report = Array.from(productMap.values()).map(({ totalCost, totalQuantity, product }) => {
+      const weightedAverageCost = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+      return {
+        ...product,
+        totalQuantity,
+        weightedAverageCost,
+        totalValue: weightedAverageCost * totalQuantity,
+      };
+    });
+
+    const totalInventoryValue = report.reduce((acc, curr) => acc + curr.totalValue, 0);
+
+    return { report, totalInventoryValue };
+  }, [activeReport, state.products]);
+
 
   const monthlyConsolidated = useMemo(() => {
     const consolidated: Record<string, { label: string, year: number, monthIdx: number, income: number, expense: number }> = {};
@@ -473,6 +507,7 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
           <button onClick={() => setActiveReport('transactions')} className={cn("px-4 py-2 rounded-lg font-black text-sm transition-all", activeReport === 'transactions' ? "bg-primary text-black" : "text-black font-black hover:bg-black/5")}>Transacciones por Fecha</button>
           <button onClick={() => setActiveReport('summary')} className={cn("px-4 py-2 rounded-lg font-black text-sm transition-all", activeReport === 'summary' ? "bg-primary text-black" : "text-black font-black hover:bg-black/5")}>Resumen de Ventas</button>
           <button onClick={() => setActiveReport('consolidated')} className={cn("px-4 py-2 rounded-lg font-black text-sm transition-all", activeReport === 'consolidated' ? "bg-primary text-black" : "text-black font-black hover:bg-black/5")}>Consolidado Ingresos/Egresos</button>
+          <button onClick={() => setActiveReport('inventory')} className={cn("px-4 py-2 rounded-lg font-black text-sm transition-all", activeReport === 'inventory' ? "bg-primary text-black" : "text-black font-black hover:bg-black/5")}><Package size={14} className="mr-2 inline-block"/>Reporte General de Inventario</button>
         </div>
         <div className="flex gap-2">
           <Button onClick={handlePrintPDF} variant="outline" className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"><Printer size={12} className="mr-1" /> Imprimir / PDF</Button>
@@ -482,6 +517,44 @@ export default function ReportsModule({ state, userRole = 'cashier' }: ReportsMo
       </div>
 
       <div ref={reportContentRef}>
+        {activeReport === 'inventory' && (
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <Package size={20} className="text-primary" />
+              <h3 className="text-lg font-black text-black uppercase">Reporte General de Inventario (CPP)</h3>
+            </div>
+            <div className="overflow-x-auto border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm">
+              <table className="w-full text-sm">
+                <thead className="bg-[#E8E8E8]">
+                  <tr className="border-b border-[#9E9E9E]">
+                    <th className="p-3 text-left text-[10px] font-black uppercase tracking-widest text-black">Producto</th>
+                    <th className="p-3 text-right text-[10px] font-black uppercase tracking-widest text-black">Cantidad Total</th>
+                    <th className="p-3 text-right text-[10px] font-black uppercase tracking-widest text-black">Costo Promedio Ponderado (USD)</th>
+                    <th className="p-3 text-right text-[10px] font-black uppercase tracking-widest text-black">Valor Total de Inventario (USD)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inventoryReportData?.report.map((p) => (
+                    <tr key={p.id} className="border-b border-[#9E9E9E]/40 hover:bg-[#F5F5F5] transition-colors">
+                      <td className="p-3 text-xs font-black text-black uppercase">{p.name}</td>
+                      <td className="p-3 text-right font-black text-black">{p.totalQuantity}</td>
+                      <td className="p-3 text-right font-black text-black">{formatUsd(p.weightedAverageCost)}</td>
+                      <td className="p-3 text-right font-black text-black">{formatUsd(p.totalValue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="bg-[#F0F0F0] border-t-2 border-[#9E9E9E]">
+                    <tr className="font-black text-black">
+                        <td colSpan={3} className="p-4 uppercase tracking-widest">Valor Total del Inventario (USD)</td>
+                        <td className="p-4 text-right font-black text-xl">{formatUsd(inventoryReportData?.totalInventoryValue || 0)}</td>
+                    </tr>
+                </tfoot>
+              </table>
+            </div>
+        </>
+      )}
+
+
         {activeReport === 'transactions' && (
           <>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">

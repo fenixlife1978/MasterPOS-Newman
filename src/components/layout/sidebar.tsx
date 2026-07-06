@@ -101,8 +101,8 @@ export default function Sidebar({ currentPage, onPageChange, userRole, onToggleC
         })}
         {currentPage === 'pos' && (
           <button
-            onClick={onToggleClients}
-            title={collapsed ? 'Ver Cliente' : undefined}
+            onClick={() => onPageChange('cuentas')}
+            title={collapsed ? 'Ver Deudas' : undefined}
             className={cn(
               "w-full rounded-xl flex items-center gap-3.5 transition-all text-left group mt-4",
               collapsed ? "justify-center px-0 h-[50px]" : "px-4 h-[50px]",
@@ -110,7 +110,7 @@ export default function Sidebar({ currentPage, onPageChange, userRole, onToggleC
             )}
           >
             <UserCircle size={20} className="shrink-0 text-black" />
-            {!collapsed && <span className="text-[13px] font-black tracking-widest">VER CLIENTE</span>}
+            {!collapsed && <span className="text-[13px] font-black tracking-widest">VER DEUDAS</span>}
           </button>
         )}
       </nav>
