@@ -6,7 +6,7 @@ import {
   Vault, Banknote, Smartphone, Fingerprint, 
   Plane, DollarSign, CreditCard, Receipt, 
   BarChart3, Clock, Percent, Eye, X,
-  RefreshCw, Search, Package, Hash, ShoppingBasket
+  RefreshCw, Search, Package, Hash, ShoppingBasket, Monitor
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -65,9 +65,13 @@ function extractTerminalIdFromSession(sessionId: string | null | undefined): str
 
 export default function CashModule({ state }: CashModuleProps) {
   const { user } = useAuth();
-  // ✅ Usar el NOMBRE legible de la terminal para los filtros de transacciones (ej: "0001")
-  const terminalId = user?.terminalName || user?.terminalId || 'default';
-  const terminalName = user?.terminalName ? `Terminal ${user.terminalName}` : 'Terminal Principal';
+  const isAdmin = user?.role === 'admin';
+  
+  const [activeTerminalId, setActiveTerminalId] = useState(user?.terminalName || user?.terminalId || 'default');
+  const [terminals, setTerminals] = useState<any[]>([]);
+  const [viewingRegister, setViewingRegister] = useState<any>(null);
+  
+  const terminalName = activeTerminalId !== 'default' ? `Terminal ${activeTerminalId}` : 'Terminal Principal';
 
   const [openAmountBs, setOpenAmountBs] = useState('0.00');
   const [openAmountUsd, setOpenAmountUsd] = useState('0.00');
@@ -87,11 +91,25 @@ export default function CashModule({ state }: CashModuleProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
-  const reg = state.register;
+  useEffect(() => {
+    const unsubscribe = syncService.subscribeToRegisterRealtime(activeTerminalId, (data) => {
+      setViewingRegister(data);
+    });
+    return () => unsubscribe();
+  }, [activeTerminalId]);
+
+  const reg = viewingRegister || state.register;
   const isClosed = !reg || !reg.isOpen;
+
+  useEffect(() => {
+    if (isAdmin) {
+      syncService.getAllTerminals().then(setTerminals).catch(console.error);
+    }
+  }, [isAdmin]);
 
   const loadTodaysTransactions = useCallback(async () => {
     if (isClosed) {
+      setTodaysTransactions([]);
       setIsLoading(false);
       return;
     }
@@ -111,18 +129,15 @@ export default function CashModule({ state }: CashModuleProps) {
           ...(tx as any) 
         }));
 
+        const openTimeMs = reg?.openTime ? new Date(reg.openTime).getTime() : 0;
+
         todayTx = allTx.filter(tx => {
-          // ✅ Priorizar el campo terminalId (que ahora guarda el nombre legible)
-          // ✅ Fallback al ID de sesión (que usa el ID técnico) solo si no hay terminalId guardado
           const txTerminal = tx.terminalId || tx.terminal_id || extractTerminalIdFromSession(tx.sessionId || tx.session_id);
-          
-          // ✅ Comparación bivalente para asegurar compatibilidad con registros antiguos (ID técnico) y nuevos (Nombre)
-          const matchesTerminal = txTerminal === terminalId || txTerminal === user?.terminalId;
-          
+          const matchesTerminal = txTerminal === activeTerminalId;
           if (!matchesTerminal) return false;
           
-          const txDate = getLocalDateStr(tx.date);
-          return txDate === today;
+          const txTimeMs = new Date(tx.date).getTime();
+          return txTimeMs >= openTimeMs;
         });
 
         todayTx.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -134,11 +149,11 @@ export default function CashModule({ state }: CashModuleProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [terminalId, user?.terminalId, isClosed]);
+  }, [activeTerminalId, isClosed, reg?.openTime]);
 
   useEffect(() => {
     loadTodaysTransactions();
-  }, [terminalId, isClosed, loadTodaysTransactions]);
+  }, [activeTerminalId, isClosed, loadTodaysTransactions]);
 
   const paymentMethods = [
     { id: 'efectivo_bs', label: 'EFECTIVO BS', icon: Banknote, isUsd: false },
@@ -149,9 +164,7 @@ export default function CashModule({ state }: CashModuleProps) {
     { id: 'zelle', label: 'ZELLE', icon: Plane, isUsd: true },
   ];
 
-  // ✅ Calcular rango de recibos de la jornada (INCLUSIVO)
   const receiptRange = useMemo(() => {
-    // Incluir todos los tipos de transacciones que generan recibo
     const saleTxs = todaysTransactions.filter(t => 
       t.type === 'contado' || 
       t.type === 'credito' || 
@@ -172,6 +185,7 @@ export default function CashModule({ state }: CashModuleProps) {
     };
   }, [todaysTransactions]);
 
+  // ✅ CRITICAL FIX: salesBreakdown con procesamiento directo para EFECTIVO BS
   const salesBreakdown = useMemo(() => {
     const totalsBs: Record<string, number> = {};
     const totalsUsd: Record<string, number> = {};
@@ -183,36 +197,67 @@ export default function CashModule({ state }: CashModuleProps) {
     if (todaysTransactions.length === 0) return { totalsBs, totalsUsd };
     
     for (const tx of todaysTransactions) {
+      // ✅ Solo procesar transacciones de contado y cobro de deuda
       if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
       
-      let payments = tx.payments || [];
-      if (typeof payments === 'string') {
-        try { payments = JSON.parse(payments); } catch(e) { payments = []; }
+      const currentRate = tx.exchangeRate || state.exchangeRate;
+      
+      // ✅ OBTENER MÉTODO DE PAGO desde payMethod o pay_method
+      const payMethod = tx.pay_method || tx.payMethod || 'efectivo_bs';
+      const normalizedMethod = payMethod === 'efectivo_usd' ? 'usd_efectivo' : payMethod;
+      const isUsdMethod = normalizedMethod === 'usd_efectivo' || normalizedMethod === 'zelle';
+      
+      // ✅ CRITICAL FIX: Para EFECTIVO BS, acumular DIRECTAMENTE del total
+      // Esto es lo más confiable porque ignora cualquier problema con payments
+      if (normalizedMethod === 'efectivo_bs') {
+        const bsAmount = tx.total || 0;
+        totalsBs['efectivo_bs'] = (totalsBs['efectivo_bs'] || 0) + bsAmount;
+        continue; // Saltar el resto del procesamiento
       }
       
-      const currentRate = tx.exchangeRate || state.exchangeRate;
-
+      // ✅ Para otros métodos, intentar con payments
+      let payments = tx.payments || tx.payment || [];
+      
+      // ✅ Si es string, parsear
+      if (typeof payments === 'string') {
+        try { payments = JSON.parse(payments); } catch(e) { 
+          payments = []; 
+        }
+      }
+      
+      // ✅ Si es objeto no array, convertir a array
+      if (typeof payments === 'object' && !Array.isArray(payments) && payments !== null) {
+        if (Object.keys(payments).length > 0 && Object.keys(payments).every(k => !isNaN(Number(k)))) {
+          payments = Object.values(payments);
+        } else {
+          const m = payments.method || payMethod;
+          payments = [{ method: m, amount: payments.amount || 0, usdAmount: payments.usdAmount || 0 }];
+        }
+      }
+      
+      // ✅ Si es array y tiene elementos, procesar
       if (Array.isArray(payments) && payments.length > 0) {
         for (const p of payments) {
-          const method = p.method || 'efectivo_bs';
-          const isUsdMethod = method === 'usd_efectivo' || method === 'zelle';
-          if (isUsdMethod) {
+          const pMethod = p.method || 'efectivo_bs';
+          const pNormalized = pMethod === 'efectivo_usd' ? 'usd_efectivo' : pMethod;
+          const pIsUsd = pNormalized === 'usd_efectivo' || pNormalized === 'zelle';
+          
+          if (pIsUsd) {
             const usdAmount = p.usdAmount !== undefined ? p.usdAmount : (p.amount / currentRate) || 0;
-            totalsUsd[method] = (totalsUsd[method] || 0) + usdAmount;
+            totalsUsd[pNormalized] = (totalsUsd[pNormalized] || 0) + usdAmount;
           } else {
             const bsAmount = p.amount || 0;
-            totalsBs[method] = (totalsBs[method] || 0) + bsAmount;
+            totalsBs[pNormalized] = (totalsBs[pNormalized] || 0) + bsAmount;
           }
         }
       } else {
-        const method = tx.pay_method || tx.payMethod || 'efectivo_bs';
-        const isUsdMethod = method === 'usd_efectivo' || method === 'zelle';
+        // ✅ Fallback: usar payMethod sin payments
         if (isUsdMethod) {
           const usdAmount = tx.total_usd || tx.totalUsd || 0;
-          totalsUsd[method] = (totalsUsd[method] || 0) + usdAmount;
+          totalsUsd[normalizedMethod] = (totalsUsd[normalizedMethod] || 0) + usdAmount;
         } else {
-          const bsAmount = tx.type === 'cobro_deuda' ? (tx.paidBs || tx.total || 0) : (tx.total || 0);
-          totalsBs[method] = (totalsBs[method] || 0) + bsAmount;
+          const bsAmount = tx.total || 0;
+          totalsBs[normalizedMethod] = (totalsBs[normalizedMethod] || 0) + bsAmount;
         }
       }
     }
@@ -232,12 +277,6 @@ export default function CashModule({ state }: CashModuleProps) {
       .reduce((sum, t) => sum + (t.total || 0), 0)
   , [todaysTransactions]);
 
-  const totalDevolucionesUsd = useMemo(() => 
-    todaysTransactions
-      .filter(t => t.type === 'devolucion')
-      .reduce((sum, t) => sum + (t.totalUsd || 0), 0)
-  , [todaysTransactions]);
-
   const totalContadoBs = useMemo(() => {
     let total = 0;
     for (const m of paymentMethods.filter(p => !p.isUsd)) {
@@ -254,9 +293,8 @@ export default function CashModule({ state }: CashModuleProps) {
     return total;
   }, [salesBreakdown]);
 
-  // ✅ CORREGIDO: El total en caja debe restar las devoluciones del periodo
   const totalEnCaja = (reg?.openAmountBs || 0) + totalContadoBs - totalDevolucionesBs;
-  const totalEnCajaUSD = (reg?.openAmountUsd || 0) + totalContadoUsd - totalDevolucionesUsd;
+  const totalEnCajaUSD = (reg?.openAmountUsd || 0) + totalContadoUsd;
 
   const handleOpenCash = async () => {
     const bsAmount = parseFloat(openAmountBs) || 0;
@@ -384,6 +422,12 @@ export default function CashModule({ state }: CashModuleProps) {
   };
 
   const getBsPaid = (tx: any): number => {
+    // ✅ Para EFECTIVO BS, usar el total directamente
+    const method = tx.pay_method || tx.payMethod || 'efectivo_bs';
+    if (method === 'efectivo_bs') {
+      return tx.total || 0;
+    }
+    
     let payments = tx.payments || [];
     if (typeof payments === 'string') {
       try { payments = JSON.parse(payments); } catch(e) { payments = []; }
@@ -391,12 +435,16 @@ export default function CashModule({ state }: CashModuleProps) {
     if (Array.isArray(payments) && payments.length > 0) {
       let totalBs = 0;
       for (const p of payments) {
-        if (p.method !== 'usd_efectivo' && p.method !== 'zelle' && p.method !== 'efectivo_usd') totalBs += p.amount || 0;
+        if (p.method !== 'usd_efectivo' && p.method !== 'zelle' && p.method !== 'efectivo_usd') {
+          totalBs += p.amount || 0;
+        }
       }
       return totalBs;
     }
-    const method = tx.pay_method || tx.payMethod || '';
-    if (method !== 'usd_efectivo' && method !== 'zelle' && method !== 'efectivo_usd') return tx.total || 0;
+    
+    if (method !== 'usd_efectivo' && method !== 'zelle' && method !== 'efectivo_usd') {
+      return tx.total || 0;
+    }
     return 0;
   };
 
@@ -439,26 +487,44 @@ export default function CashModule({ state }: CashModuleProps) {
     <div className="h-full w-full overflow-y-auto overflow-x-hidden bg-[#F9F4E1]">
       <div className="min-h-full p-4 pb-8">
         <header className="bg-[#1E3A8A] text-white p-4 rounded-t-xl shadow-md text-center relative border-b-4 border-[#0284C7]">
-          <div className="absolute left-4 top-4 bg-amber-50 text-[10px] font-bold px-2 py-1 rounded text-slate-900">{terminalName}</div>
+          <div className="absolute left-4 top-4 flex items-center gap-2">
+            {isAdmin && terminals.length > 0 ? (
+              <div className="bg-amber-50 text-slate-900 px-3 py-1 rounded font-black text-sm flex items-center gap-2">
+                <Monitor size={14} />
+                <select 
+                  value={activeTerminalId} 
+                  onChange={(e) => setActiveTerminalId(e.target.value)}
+                  className="bg-transparent border-none font-black outline-none cursor-pointer uppercase"
+                >
+                  {terminals.map(t => (
+                    <option key={t.id} value={t.id}>Terminal {t.name || t.id}</option>
+                  ))}
+                  <option value="default">Terminal Principal</option>
+                </select>
+              </div>
+            ) : (
+              <div className="bg-amber-50 text-slate-900 px-3 py-1 rounded font-black text-sm">{terminalName}</div>
+            )}
+          </div>
           <h1 className="text-lg md:text-xl font-black tracking-wider uppercase">MasterPOS - Control de Caja</h1>
           <div className="flex items-center justify-center gap-2 mt-1">
-            <p className="text-[10px] text-blue-200 font-mono flex items-center gap-1"><Clock size={10} /> {new Date().toLocaleDateString('es-VE')} • {new Date().toLocaleTimeString('es-VE')}</p>
+            <p className="text-[10px] text-blue-200 font-mono flex items-center gap-1 font-black"><Clock size={10} /> {new Date().toLocaleDateString('es-VE')} • {new Date().toLocaleTimeString('es-VE')}</p>
           </div>
         </header>
 
         <section className="bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-4 border-x border-slate-200 shadow-sm">
           <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-            <span className="text-slate-500 block text-[10px] font-bold uppercase">Tasa BCV Actual:</span>
-            <span className="text-base font-mono font-bold text-slate-900">{formatBsNumber(state.exchangeRate)} / $</span>
+            <span className="text-slate-500 block text-[10px] font-black uppercase">Tasa BCV Actual:</span>
+            <span className="text-base font-mono font-black text-slate-900">{formatBsNumber(state.exchangeRate)} / $</span>
           </div>
           <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-            <span className="text-slate-500 block text-[10px] font-bold uppercase">Estado Actual:</span>
-            <span className={cn("text-sm font-mono font-bold px-3 py-1 rounded-full inline-block", isClosed ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>{isClosed ? 'CAJA CERRADA' : 'CAJA ABIERTA'}</span>
+            <span className="text-slate-500 block text-[10px] font-black uppercase">Estado Actual:</span>
+            <span className={cn("text-sm font-mono font-black px-3 py-1 rounded-full inline-block", isClosed ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>{isClosed ? 'CAJA CERRADA' : 'CAJA ABIERTA'}</span>
           </div>
           <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-            <span className="text-slate-500 block text-[10px] font-bold uppercase">Total en Caja (Sistema):</span>
-            <span className="text-base font-mono font-bold text-blue-700">{!isClosed ? formatBs(totalEnCaja) : '—'}</span>
-            {!isClosed && <p className="text-[10px] text-slate-500">≈ {formatUsd(totalEnCajaUSD)}</p>}
+            <span className="text-slate-500 block text-[10px] font-black uppercase">Total en Caja (Sistema):</span>
+            <span className="text-base font-mono font-black text-blue-700">{!isClosed ? formatBs(totalEnCaja) : '—'}</span>
+            {!isClosed && <p className="text-[10px] text-slate-500 font-black">≈ {formatUsd(totalEnCajaUSD)}</p>}
           </div>
         </section>
 
@@ -469,19 +535,19 @@ export default function CashModule({ state }: CashModuleProps) {
                 <Receipt size={14} className="text-blue-600" />
                 <div>
                   <p className="text-[8px] font-black text-slate-500 uppercase">Recibo Inicial</p>
-                  <p className="text-xs font-mono font-bold text-slate-900">#{receiptRange.first}</p>
+                  <p className="text-xs font-mono font-black text-slate-900">#{receiptRange.first}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
                 <Hash size={14} className="text-emerald-600" />
                 <div>
                   <p className="text-[8px] font-black text-slate-500 uppercase">Último Recibo</p>
-                  <p className="text-xs font-mono font-bold text-slate-900">#{receiptRange.last}</p>
+                  <p className="text-xs font-mono font-black text-slate-900">#{receiptRange.last}</p>
                 </div>
               </div>
             </div>
-            <div className="text-[10px] font-bold text-slate-400 italic">
-              * Rango incluye ventas, créditos, consumos y devoluciones
+            <div className="text-[10px] font-black text-slate-400 italic">
+              * Rango incluye ventas, créditos, consumos y devoluciones de la sesión actual
             </div>
           </div>
         )}
@@ -490,8 +556,8 @@ export default function CashModule({ state }: CashModuleProps) {
           <div className="bg-white border-x border-b border-slate-200 rounded-b-xl p-6 shadow-md">
             <h2 className="text-sm font-black uppercase mb-4 text-[#1E3A8A] flex items-center gap-2"><Banknote size={14} /> APERTURA DE CAJA</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div><label className="text-[9px] font-bold uppercase block mb-1 text-slate-500">Apertura BS</label><Input type="number" step="0.01" value={openAmountBs} onChange={(e) => setOpenAmountBs(e.target.value)} className="font-bold h-8 text-sm" placeholder="0.00" /></div>
-              <div><label className="text-[9px] font-bold uppercase block mb-1 text-slate-500">Apertura USD</label><Input type="number" step="0.01" value={openAmountUsd} onChange={(e) => setOpenAmountUsd(e.target.value)} className="font-bold h-8 text-sm" placeholder="0.00" /></div>
+              <div><label className="text-[9px] font-black uppercase block mb-1 text-slate-500">Apertura BS</label><Input type="number" step="0.01" value={openAmountBs} onChange={(e) => setOpenAmountBs(e.target.value)} className="font-black h-8 text-sm" placeholder="0.00" /></div>
+              <div><label className="text-[9px] font-black uppercase block mb-1 text-slate-500">Apertura USD</label><Input type="number" step="0.01" value={openAmountUsd} onChange={(e) => setOpenAmountUsd(e.target.value)} className="font-black h-8 text-sm" placeholder="0.00" /></div>
               <div className="flex items-end"><Button onClick={handleOpenCash} disabled={isOpeningCash} className="w-full bg-[#2ECC71] hover:bg-[#27AE60] text-white font-black h-8 text-xs">{isOpeningCash ? 'ABRIENDO...' : 'ABRIR CAJA'}</Button></div>
             </div>
           </div>
@@ -509,24 +575,41 @@ export default function CashModule({ state }: CashModuleProps) {
               <h3 className="text-xs font-black uppercase mb-3 flex items-center gap-2 text-[#1E3A8A]"><Vault size={12} /> Ventas del Período Actual</h3>
               <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-md">
                 <table className="w-full text-left border-collapse text-[10px]">
-                  <thead><tr className="bg-[#2c3e50] text-white text-[9px] uppercase font-bold tracking-wider"><th className="p-2">MÉTODO DE PAGO</th><th className="p-2 text-right">TOTAL (Bs)</th><th className="p-2 text-right">TOTAL (USD)</th></tr></thead>
+                  <thead><tr className="bg-[#2c3e50] text-white text-[9px] uppercase font-black tracking-wider"><th className="p-2">MÉTODO DE PAGO</th><th className="p-2 text-right">TOTAL (Bs)</th><th className="p-2 text-right">TOTAL (USD)</th></tr></thead>
                   <tbody className="divide-y divide-slate-200">
                     {paymentMethods.map(({ id, label, icon: Icon, isUsd }) => (
-                      <tr key={id} className="hover:bg-slate-50"><td className="p-2"><div className="flex items-center gap-2"><Icon size={12} className="text-[#1E3A8A]" /><span className="font-bold">{label}</span></div></td><td className="p-2 text-right font-mono font-bold">{!isUsd ? formatBs(salesBreakdown.totalsBs[id] || 0) : '—'}</td><td className="p-2 text-right font-mono font-bold">{isUsd ? formatUsd(salesBreakdown.totalsUsd[id] || 0) : '—'}</td></tr>
+                      <tr key={id} className="hover:bg-slate-50">
+                        <td className="p-2"><div className="flex items-center gap-2"><Icon size={12} className="text-[#1E3A8A]" /><span className="font-black text-black">{label}</span></div></td>
+                        <td className="p-2 text-right font-mono font-black text-black">{!isUsd ? formatBs(salesBreakdown.totalsBs[id] || 0) : '—'}</td>
+                        <td className="p-2 text-right font-mono font-black text-black">{isUsd ? formatUsd(salesBreakdown.totalsUsd[id] || 0) : '—'}</td>
+                      </tr>
                     ))}
-                    <tr className="bg-blue-50/30 font-bold"><td className="p-2">VENTAS A CRÉDITO</td><td className="p-2 text-right font-mono text-blue-700">{formatBs(totalCreditoBs)}</td><td className="p-2 text-right">—</td></tr>
-                    <tr className="bg-red-50 text-red-700 font-bold"><td className="p-2">TOTAL DEVOLUCIONES</td><td className="p-2 text-right font-mono">{totalDevolucionesBs > 0 ? `-${formatBs(totalDevolucionesBs)}` : 'Bs. 0,00'}</td><td className="p-2 text-right">{totalDevolucionesUsd > 0 ? `-${formatUsd(totalDevolucionesUsd)}` : '—'}</td></tr>
+                    <tr className="bg-blue-50/30 font-black">
+                      <td className="p-2 text-black">VENTAS A CRÉDITO</td>
+                      <td className="p-2 text-right font-mono text-blue-700">{formatBs(totalCreditoBs)}</td>
+                      <td className="p-2 text-right">—</td>
+                    </tr>
+                    <tr className="bg-amber-50/50 font-black">
+                      <td className="p-2 text-black">TOTAL USD EFECTIVO</td>
+                      <td className="p-2 text-right">—</td>
+                      <td className="p-2 text-right font-mono text-emerald-700">{formatUsd(totalContadoUsd)}</td>
+                    </tr>
+                    <tr className="bg-red-50 text-red-700 font-black">
+                      <td className="p-2 font-black">TOTAL DEVOLUCIONES</td>
+                      <td className="p-2 text-right font-mono">{totalDevolucionesBs > 0 ? `-${formatBs(totalDevolucionesBs)}` : 'Bs. 0,00'}</td>
+                      <td className="p-2 text-right">—</td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
             </div>
 
             <div className="mt-6">
-              <div className="flex items-center justify-between mb-3"><h3 className="text-xs font-black uppercase flex items-center gap-2 text-[#1E3A8A]"><Receipt size={12} /> Transacciones del Día</h3><Input placeholder="Buscar recibo..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="h-7 text-[10px] w-40 border-slate-200" /></div>
+              <div className="flex items-center justify-between mb-3"><h3 className="text-xs font-black uppercase flex items-center gap-2 text-[#1E3A8A]"><Receipt size={12} /> Transacciones de la Sesión</h3><Input placeholder="Buscar recibo..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="h-7 text-[10px] w-40 border-slate-200 font-black" /></div>
               <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-md">
                 <table className="w-full text-left border-collapse text-[10px]">
                   <thead>
-                    <tr className="bg-[#2c3e50] text-white text-[9px] uppercase font-bold tracking-wider">
+                    <tr className="bg-[#2c3e50] text-white text-[9px] uppercase font-black tracking-wider">
                       <th className="p-2"># RECIBO</th>
                       <th className="p-2">HORA</th>
                       <th className="p-2">CLIENTE</th>
@@ -540,15 +623,15 @@ export default function CashModule({ state }: CashModuleProps) {
                   <tbody className="divide-y divide-slate-200">
                     {paginatedTransactions.map((t: any) => (
                       <tr key={t.id} className="hover:bg-slate-50">
-                        <td className={cn("p-2 font-mono font-bold", t.type === 'devolucion' ? "text-red-600" : "text-slate-700")}>
+                        <td className={cn("p-2 font-mono font-black", t.type === 'devolucion' ? "text-red-600" : "text-slate-700")}>
                           {getDisplayReceipt(t)}
                         </td>
-                        <td className="p-2 font-mono">{new Date(t.date).toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' })}</td>
-                        <td className="p-2 truncate max-w-[150px]">{t.client_name || t.clientName || 'Cliente Final'}</td>
+                        <td className="p-2 font-mono font-black text-black">{new Date(t.date).toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' })}</td>
+                        <td className="p-2 truncate max-w-[150px] font-black text-black">{t.client_name || t.clientName || 'Cliente Final'}</td>
                         <td className="p-2 text-center"><span className={cn("text-[8px] font-black px-2 py-0.5 rounded-full", getTransactionColor(t.type))}>{getTransactionTypeLabel(t.type)}</span></td>
-                        <td className="p-2 text-center font-bold">{getPaymentMethodLabel(t)}</td>
-                        <td className="p-2 text-right font-bold">{formatBs(getBsPaid(t))}</td>
-                        <td className="p-2 text-right font-bold text-cyan-700">
+                        <td className="p-2 text-center font-black text-black">{getPaymentMethodLabel(t)}</td>
+                        <td className="p-2 text-right font-black text-black">{formatBs(getBsPaid(t))}</td>
+                        <td className="p-2 text-right font-black text-cyan-700">
                           {getUsdPaid(t) > 0 ? formatUsd(getUsdPaid(t)) : '—'}
                         </td>
                         <td className="p-2 text-center"><button onClick={() => { setSelectedTransaction(t); setShowDetailModal(true); }} className="p-1 hover:bg-primary/20 rounded-lg"><Eye size={14} className="text-[#1E3A8A]" /></button></td>
@@ -556,12 +639,12 @@ export default function CashModule({ state }: CashModuleProps) {
                     ))}
                     {filteredTransactions.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="text-center py-10 text-black/40 italic">No hay transacciones registradas</td>
+                        <td colSpan={8} className="text-center py-10 text-black font-black italic">No hay transacciones registradas en esta sesión</td>
                       </tr>
                     )}
                   </tbody>
                 </table>
-                {totalPages > 1 && <div className="p-3 border-t flex justify-between"><Button variant="outline" size="sm" onClick={() => goToPage(currentPage-1)} disabled={currentPage===1} className="h-6 text-[9px]">Anterior</Button><Button variant="outline" size="sm" onClick={() => goToPage(currentPage+1)} disabled={currentPage===totalPages} className="h-6 text-[9px]">Siguiente</Button></div>}
+                {totalPages > 1 && <div className="p-3 border-t flex justify-between"><Button variant="outline" size="sm" onClick={() => goToPage(currentPage-1)} disabled={currentPage===1} className="h-6 text-[9px] font-black">Anterior</Button><Button variant="outline" size="sm" onClick={() => goToPage(currentPage+1)} disabled={currentPage===totalPages} className="h-6 text-[9px] font-black">Siguiente</Button></div>}
               </div>
             </div>
           </>
@@ -578,30 +661,30 @@ export default function CashModule({ state }: CashModuleProps) {
               <div className="bg-[#1A2C4E] p-4 text-white sticky top-0 z-10 flex justify-between items-center"><h3 className="text-lg font-black">Detalle de Transacción #{getDisplayReceipt(selectedTransaction)}</h3><button onClick={() => setShowDetailModal(false)}><X size={18} /></button></div>
               <div className="p-5 space-y-6">
                 <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div><label className="text-[9px] font-black text-black/60 uppercase">Fecha</label><p className="font-bold">{new Date(selectedTransaction.date).toLocaleString('es-VE')}</p></div>
-                  <div><label className="text-[9px] font-black text-black/60 uppercase">Tipo</label><p className={cn("font-bold", getTransactionColor(selectedTransaction.type))}>{getTransactionTypeLabel(selectedTransaction.type)}</p></div>
-                  <div><label className="text-[9px] font-black text-black/60 uppercase">Cliente</label><p className="font-bold">{selectedTransaction.client_name || selectedTransaction.clientName || 'Cliente Final'}</p></div>
-                  <div><label className="text-[9px] font-black text-black/60 uppercase">Método</label><p className="font-bold">{getPaymentMethodLabel(selectedTransaction)}</p></div>
+                  <div><label className="text-[9px] font-black text-black/60 uppercase">Fecha</label><p className="font-black text-black">{new Date(selectedTransaction.date).toLocaleString('es-VE')}</p></div>
+                  <div><label className="text-[9px] font-black text-black/60 uppercase">Tipo</label><p className={cn("font-black", getTransactionColor(selectedTransaction.type))}>{getTransactionTypeLabel(selectedTransaction.type)}</p></div>
+                  <div><label className="text-[9px] font-black text-black/60 uppercase">Cliente</label><p className="font-black text-black">{selectedTransaction.client_name || selectedTransaction.clientName || 'Cliente Final'}</p></div>
+                  <div><label className="text-[9px] font-black text-black/60 uppercase">Método</label><p className="font-black text-black">{getPaymentMethodLabel(selectedTransaction)}</p></div>
                   <div><label className="text-[9px] font-black text-black/60 uppercase">Total Bs</label><p className="text-lg font-black text-primary">{formatBs(getBsPaid(selectedTransaction))}</p></div>
                   <div><label className="text-[9px] font-black text-black/60 uppercase">Total USD</label><p className="text-lg font-black text-cyan-700">{getUsdPaid(selectedTransaction) > 0 ? formatUsd(getUsdPaid(selectedTransaction)) : '—'}</p></div>
                 </div>
 
                 {txItems.length > 0 && (
                   <div>
-                    <h4 className="text-xs font-black uppercase text-black/60 flex items-center gap-2 mb-3">
+                    <h4 className="text-xs font-black uppercase text-black/60 flex items-gap-2 mb-3">
                       <Package size={14} className="text-primary" /> 
                       {selectedTransaction.type === 'devolucion' ? 'Productos Devueltos' : 'Productos Vendidos'}
                     </h4>
                     <div className="border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm">
                       <table className="w-full text-sm">
-                        <thead className="bg-[#E8E8E8]"><tr className="text-[10px] font-black uppercase"><th className="text-left p-3">Producto</th><th className="text-center p-3">Cant.</th><th className="text-center p-3">U.M.</th><th className="text-right p-3">Total Bs</th></tr></thead>
+                        <thead className="bg-[#E8E8E8]"><tr className="text-[10px] font-black uppercase"><th className="text-left p-3 text-black">Producto</th><th className="text-center p-3 text-black">Cant.</th><th className="text-center p-3 text-black">U.M.</th><th className="text-right p-3 text-black">Total Bs</th></tr></thead>
                         <tbody className="divide-y divide-gray-100">
                           {txItems.map((item: any, idx: number) => (
                             <tr key={idx} className="text-xs">
-                              <td className="p-3 font-bold">{item.name}</td>
-                              <td className="p-3 text-center">{item.qty}</td>
-                              <td className="p-3 text-center text-[10px] text-black/60">{item.unitMeasure || 'UNID'}</td>
-                              <td className="p-3 text-right font-black">{formatBs(item.priceBs * item.qty)}</td>
+                              <td className="p-3 font-black text-black">{item.name}</td>
+                              <td className="p-3 text-center font-black text-black">{item.qty}</td>
+                              <td className="p-3 text-center text-[10px] text-black font-black">{item.unitMeasure || 'UNID'}</td>
+                              <td className="p-3 text-right font-black text-black">{formatBs(item.priceBs * item.qty)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -617,7 +700,7 @@ export default function CashModule({ state }: CashModuleProps) {
       </Dialog>
 
       {showCambioTasaModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"><div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6"><h2 className="text-lg font-black mb-4">Cambiar Tasa BCV</h2><Input type="number" step="0.01" value={nuevaTasaInput} onChange={(e) => setNuevaTasaInput(e.target.value)} className="font-mono text-right" /><div className="flex gap-3 justify-end mt-4"><Button variant="ghost" onClick={() => setShowCambioTasaModal(false)}>Cancelar</Button><Button onClick={handleCambioTasa} disabled={isUpdatingRate} className="bg-primary text-black font-black">Actualizar</Button></div></div></div>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"><div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 font-black"><h2 className="text-lg font-black mb-4 uppercase">Cambiar Tasa BCV</h2><Input type="number" step="0.01" value={nuevaTasaInput} onChange={(e) => setNuevaTasaInput(e.target.value)} className="font-mono text-right font-black" /><div className="flex gap-3 justify-end mt-4"><Button variant="ghost" onClick={() => setShowCambioTasaModal(false)} className="font-black text-black">Cancelar</Button><Button onClick={handleCambioTasa} disabled={isUpdatingRate} className="bg-primary text-black font-black">Actualizar</Button></div></div></div>
       )}
     </div>
   );

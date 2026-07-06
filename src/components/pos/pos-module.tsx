@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -30,13 +29,22 @@ const formatUsd = (amount: number): string => {
   });
 };
 
+// ✅ Función de redondeo preciso a 2 decimales
+const roundToCent = (num: number): number => {
+  return Math.round(num * 100) / 100;
+};
+
+// ✅ Función para convertir decimal a céntimos
+const decimalToCents = (amount: number): number => {
+  return Math.round(amount * 100);
+};
+
 interface POSModuleProps {
   state: ReturnType<typeof usePOSState>;
 }
 
 export default function POSModule({ state }: POSModuleProps) {
   const { user } = useAuth();
-  // ✅ Identificación bivalente: ID para sync, Nombre para registros de auditoría
   const terminalSyncId = user?.terminalId || 'default';
   const terminalName = user?.terminalName || 'Principal';
   
@@ -58,7 +66,6 @@ export default function POSModule({ state }: POSModuleProps) {
   const lastClickTimeRef = useRef<number>(0);
   const DEBOUNCE_MS = 2000;
 
-  // ✅ Correlativo aislado por NOMBRE de terminal (ej. 0001)
   const getStorageKey = () => `last_receipt_number_${terminalName}`;
 
   const canExecuteOperation = useCallback((): boolean => {
@@ -74,7 +81,6 @@ export default function POSModule({ state }: POSModuleProps) {
   const checkAndGetNextTicketNumber = useCallback(async (): Promise<number> => {
     const usedNumbers = new Set<number>();
     for (const t of state.transactions) {
-      // ✅ Comparar contra el nombre legible guardado en terminalId
       if (t.receiptNumber && t.terminalId === terminalName) {
         usedNumbers.add(t.receiptNumber);
       }
@@ -113,30 +119,69 @@ export default function POSModule({ state }: POSModuleProps) {
     }
   }, [terminalName]);
 
+  // ✅ Calcular totales como en CartPanel
   const subtotal = state.cart.reduce((s, i) => s + (i.priceBs * i.qty), 0);
-  const iva = state.cart.reduce((total, item) => {
-    const hasIva = (item as any).ivaType === 'con_iva';
-    if (hasIva) {
-      const itemTotal = item.priceBs * item.qty;
-      return total + (itemTotal * 0.16);
+  
+  const ivaAmount = state.cart.reduce((total, item) => {
+    const isTaxable = (item as any).ivaType === 'con_iva';
+    if (isTaxable) {
+      return total + (item.priceBs * item.qty);
     }
     return total;
   }, 0);
-  const totalWithIva = state.isIvaEnabled ? subtotal + iva : subtotal;
+  
+  const iva = state.isIvaEnabled ? ivaAmount * 0.16 : 0;
+  const totalWithIva = roundToCent(subtotal + iva);
   const totalForCredit = totalWithIva;
 
+  // ✅ Handler de pago con corrección de redondeo
   const handlePaymentConfirm = async (data: any) => {
     if (isProcessingContado || !canExecuteOperation()) return;
     setIsProcessingContado(true);
     
     try {
+      let { payments, totalPaid, change, method, ajusteRedondeoBs } = data;
+      
+      // ✅ Usar el total calculado de manera consistente con CartPanel
+      const totalExacto = totalWithIva;
+      
+      // ✅ Verificar si es pago en USD exacto
+      const totalUsd = roundToCent(totalExacto / state.exchangeRate);
+      const totalUsdFromPayments = roundToCent(payments.reduce((sum: number, p: any) => sum + (p.usdAmount || 0), 0));
+      
+      // ✅ Si el pago en USD es exacto (tolerancia de 0.005)
+      if (Math.abs(totalUsdFromPayments - totalUsd) <= 0.005) {
+        change = 0;
+        totalPaid = totalExacto;
+        ajusteRedondeoBs = 0;
+        console.log('✅ Pago en USD exacto - Cambio forzado a 0');
+      }
+      
+      // ✅ Si el cambio es menor a 0.01, considerarlo como 0
+      if (Math.abs(change) < 0.01) {
+        change = 0;
+      }
+      
+      // ✅ Si el total pagado es casi igual al total (tolerancia 0.01)
+      if (Math.abs(totalPaid - totalExacto) < 0.01) {
+        totalPaid = totalExacto;
+        change = 0;
+      }
+      
       const safeReceiptNum = await checkAndGetNextTicketNumber();
-      // ✅ Guardar terminalName como terminalId en la transacción
-      const tx = await state.finalizeSale('contado', { 
-        ...data, 
+      
+      const paymentData = {
+        ...data,
+        payments,
+        totalPaid,
+        change,
+        method,
+        ajusteRedondeoBs,
         receiptNumber: safeReceiptNum,
-        terminalId: terminalName 
-      });
+        terminalId: terminalName
+      };
+      
+      const tx = await state.finalizeSale('contado', paymentData);
       
       if (tx) {
         lastReceiptNumberRef.current = safeReceiptNum;
@@ -160,7 +205,6 @@ export default function POSModule({ state }: POSModuleProps) {
     
     try {
       const safeReceiptNum = await checkAndGetNextTicketNumber();
-      // ✅ Guardar terminalName como terminalId en la transacción
       const tx = await state.finalizeSale('credito', {
         clientId: data.clientId,
         clientName: data.clientName,
@@ -206,7 +250,6 @@ export default function POSModule({ state }: POSModuleProps) {
       }
 
       const safeReceiptNum = await checkAndGetNextTicketNumber();
-      // ✅ Guardar terminalName como terminalId en la transacción
       const tx = await state.finalizeSale(type, {
         receiptNumber: safeReceiptNum,
         notes: motivo,
@@ -279,6 +322,7 @@ export default function POSModule({ state }: POSModuleProps) {
       {showContado && (
         <FloatingPaymentModal
           total={totalWithIva}
+          totalCents={decimalToCents(totalWithIva)}
           exchangeRate={state.exchangeRate}
           onClose={() => setShowContado(false)}
           onConfirm={handlePaymentConfirm}

@@ -1,6 +1,16 @@
 // src/lib/types.ts
 // ============================================================
-// TIPOS GLOBALES
+// TIPOS GLOBALES - VERSIÓN CÉNTIMOS (ESTILO BANCARIO COBOL)
+// ============================================================
+
+// ============================================================
+// 🏦 NOTA SOBRE MONTOS:
+// Todos los montos se almacenan en CÉNTIMOS (enteros)
+// - priceCents, totalCents, amountCents, etc.
+// - Para Bs: 1 Bs = 100 céntimos
+// - Para USD: 1 USD = 100 céntimos
+// - Las operaciones aritméticas se hacen con enteros
+// - Solo se formatean al mostrar (dividir entre 100)
 // ============================================================
 
 export interface Product {
@@ -11,10 +21,14 @@ export interface Product {
   department?: string;
   stock: number;
   minStock?: number;
-  priceUsd: number;
-  priceBs: number;
-  costUsd?: number;
-  costBs?: number;
+  priceUsd: number;      // ⚠️ DEPRECATED - usar priceUsdCents
+  priceBs: number;       // ⚠️ DEPRECATED - usar priceBsCents
+  priceUsdCents: number; // ✅ PRECIO EN CÉNTIMOS DE USD (entero)
+  priceBsCents: number;  // ✅ PRECIO EN CÉNTIMOS DE BS (entero)
+  costUsd?: number;      // ⚠️ DEPRECATED - usar costUsdCents
+  costBs?: number;       // ⚠️ DEPRECATED - usar costBsCents
+  costUsdCents?: number; // ✅ COSTO EN CÉNTIMOS DE USD
+  costBsCents?: number;  // ✅ COSTO EN CÉNTIMOS DE BS
   profitPercent?: number;
   priceRetail?: number;
   priceWholesale?: number;
@@ -46,7 +60,8 @@ export interface Client {
   cedula: string;
   phone: string;
   address: string;
-  debt?: number;
+  debt?: number;         // ⚠️ DEPRECATED - usar debtCents
+  debtCents?: number;    // ✅ DEUDA EN CÉNTIMOS DE BS (entero)
   createdAt?: string;
   updatedAt?: string;
 }
@@ -56,22 +71,30 @@ export interface Transaction {
   date: string;
   type: 'contado' | 'credito' | 'cobro_deuda' | 'colaboracion' | 'consumo_propio' | 'devolucion';
   items: CartItem[];
-  subtotal: number;
-  iva: number;
-  total: number;
-  totalUsd: number;
+  subtotal: number;       // ⚠️ DEPRECATED - usar subtotalCents
+  iva: number;            // ⚠️ DEPRECATED - usar ivaCents
+  total: number;          // ⚠️ DEPRECATED - usar totalCents
+  totalUsd: number;       // ⚠️ DEPRECATED - usar totalUsdCents
+  subtotalCents: number;  // ✅ SUBTOTAL EN CÉNTIMOS DE BS (entero)
+  ivaCents: number;       // ✅ IVA EN CÉNTIMOS DE BS (entero)
+  totalCents: number;     // ✅ TOTAL EN CÉNTIMOS DE BS (entero)
+  totalUsdCents: number;  // ✅ TOTAL EN CÉNTIMOS DE USD (entero)
   payMethod: string;
-  paidBs: number;
-  change: number;
+  paidBs: number;         // ⚠️ DEPRECATED - usar paidBsCents
+  paidBsCents: number;    // ✅ PAGADO EN CÉNTIMOS DE BS (entero)
+  change: number;         // ⚠️ DEPRECATED - usar changeCents
+  changeCents: number;    // ✅ VUELTO EN CÉNTIMOS DE BS (entero)
   clientId?: number;
   clientName?: string;
-  exchangeRate: number;
+  exchangeRate: number;   // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA DE CAMBIO EN CÉNTIMOS (entero, ej: 66723 = 667.23)
   receiptNumber?: number;
   costoTotalOperacion?: number;
   notes?: string;
   authorizedBy?: string;
   sessionId?: string;
-  ajusteRedondeoBs?: number;
+  ajusteRedondeoBs?: number; // ⚠️ DEPRECATED - usar ajusteRedondeoBsCents
+  ajusteRedondeoBsCents?: number; // ✅ AJUSTE EN CÉNTIMOS DE BS
   payments?: Payment[];
   terminalId?: string | number;
   referenceId?: string | number;
@@ -82,15 +105,19 @@ export interface Transaction {
 export interface Payment {
   id: string;
   method: string;
-  amount: number;
-  usdAmount?: number;
+  amount: number;        // ⚠️ DEPRECATED - usar amountCents
+  amountCents: number;   // ✅ MONTO EN CÉNTIMOS (según moneda del método)
+  usdAmount?: number;    // ⚠️ DEPRECATED - usar usdAmountCents
+  usdAmountCents?: number; // ✅ MONTO USD EN CÉNTIMOS
 }
 
 export interface CartItem {
   productId: number;
   name: string;
-  priceBs: number;
-  priceUsd: number;
+  priceBs: number;       // ⚠️ DEPRECATED - usar priceBsCents
+  priceUsd: number;      // ⚠️ DEPRECATED - usar priceUsdCents
+  priceBsCents: number;  // ✅ PRECIO EN CÉNTIMOS DE BS (entero)
+  priceUsdCents: number; // ✅ PRECIO EN CÉNTIMOS DE USD (entero)
   qty: number;
   category: Category;
   ivaType: string;
@@ -107,12 +134,17 @@ export interface Account {
   clientName: string;
   clientCedula: string;
   products: string;
-  amountBs: number;
-  amountUsd: number;
-  paidAmount: number;
-  paidAmountUsd?: number;
+  amountBs: number;      // ⚠️ DEPRECATED - usar amountBsCents
+  amountUsd: number;     // ⚠️ DEPRECATED - usar amountUsdCents
+  amountBsCents: number; // ✅ MONTO EN CÉNTIMOS DE BS
+  amountUsdCents: number; // ✅ MONTO EN CÉNTIMOS DE USD
+  paidAmount: number;    // ⚠️ DEPRECATED - usar paidAmountCents
+  paidAmountCents: number; // ✅ PAGADO EN CÉNTIMOS DE BS
+  paidAmountUsd?: number; // ⚠️ DEPRECATED - usar paidAmountUsdCents
+  paidAmountUsdCents?: number; // ✅ PAGADO EN CÉNTIMOS DE USD
   status: 'pendiente' | 'parcial' | 'pagada';
-  exchangeRate: number;
+  exchangeRate: number;  // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA EN CÉNTIMOS
   createdAt?: string;
   updatedAt?: string;
 }
@@ -120,11 +152,15 @@ export interface Account {
 export interface CashRegister {
   isOpen: boolean;
   openTime: string | null;
-  openAmount: number;
-  openAmountBs: number;
-  openAmountUsd: number;
+  openAmount: number;      // ⚠️ DEPRECATED - usar openAmountCents
+  openAmountBs: number;    // ⚠️ DEPRECATED - usar openAmountBsCents
+  openAmountUsd: number;   // ⚠️ DEPRECATED - usar openAmountUsdCents
+  openAmountCents: number; // ✅ MONTO APERTURA EN CÉNTIMOS (BS)
+  openAmountBsCents: number; // ✅ APERTURA EN CÉNTIMOS DE BS
+  openAmountUsdCents: number; // ✅ APERTURA EN CÉNTIMOS DE USD
   txs: Transaction[];
-  exchangeRate: number | null;
+  exchangeRate: number | null; // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number | null; // ✅ TASA EN CÉNTIMOS
 }
 
 export interface CashClose {
@@ -132,11 +168,16 @@ export interface CashClose {
   terminalId: string;
   openTime: string;
   closeTime: string;
-  initialAmount: number;
-  finalAmount: number;
-  expectedAmount: number;
-  difference: number;
-  totalSales: number;
+  initialAmount: number;   // ⚠️ DEPRECATED - usar initialAmountCents
+  finalAmount: number;     // ⚠️ DEPRECATED - usar finalAmountCents
+  expectedAmount: number;  // ⚠️ DEPRECATED - usar expectedAmountCents
+  difference: number;      // ⚠️ DEPRECATED - usar differenceCents
+  initialAmountCents: number; // ✅ EN CÉNTIMOS
+  finalAmountCents: number;   // ✅ EN CÉNTIMOS
+  expectedAmountCents: number; // ✅ EN CÉNTIMOS
+  differenceCents: number;    // ✅ EN CÉNTIMOS
+  totalSales: number;      // ⚠️ DEPRECATED - usar totalSalesCents
+  totalSalesCents: number; // ✅ EN CÉNTIMOS
   transactions: Transaction[];
   notes?: string;
 }
@@ -175,8 +216,10 @@ export interface Supplier {
   address: string;
   email?: string;
   contactPerson?: string;
-  debt?: number;
-  totalDebt?: number;
+  debt?: number;          // ⚠️ DEPRECATED - usar debtCents
+  totalDebt?: number;     // ⚠️ DEPRECATED - usar totalDebtCents
+  debtCents?: number;     // ✅ DEUDA EN CÉNTIMOS DE BS
+  totalDebtCents?: number; // ✅ DEUDA TOTAL EN CÉNTIMOS DE BS
   createdAt?: string;
   updatedAt?: string;
 }
@@ -187,14 +230,18 @@ export interface SupplierInvoice {
   supplierName: string;
   date: string;
   invoiceNumber?: string;
-  total: number;
-  totalUsd?: number;
-  exchangeRate: number;
+  total: number;          // ⚠️ DEPRECATED - usar totalCents
+  totalUsd?: number;      // ⚠️ DEPRECATED - usar totalUsdCents
+  totalCents: number;     // ✅ TOTAL EN CÉNTIMOS DE BS
+  totalUsdCents?: number; // ✅ TOTAL EN CÉNTIMOS DE USD
+  exchangeRate: number;   // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA EN CÉNTIMOS
   status: 'pendiente' | 'pagada' | 'parcial';
   paymentMethod?: string;
   notes?: string;
   items?: PurchaseInvoiceItem[];
-  paidAmount?: number;
+  paidAmount?: number;    // ⚠️ DEPRECATED - usar paidAmountCents
+  paidAmountCents?: number; // ✅ PAGADO EN CÉNTIMOS DE BS
   itemsCount?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -205,15 +252,19 @@ export interface PurchaseInvoice {
   supplierId: number;
   supplierName: string;
   date: string;
-  total: number;
-  totalUsd?: number;
-  exchangeRate: number;
+  total: number;          // ⚠️ DEPRECATED - usar totalCents
+  totalUsd?: number;      // ⚠️ DEPRECATED - usar totalUsdCents
+  totalCents: number;     // ✅ TOTAL EN CÉNTIMOS DE BS
+  totalUsdCents?: number; // ✅ TOTAL EN CÉNTIMOS DE USD
+  exchangeRate: number;   // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA EN CÉNTIMOS
   status: 'pendiente' | 'pagada' | 'parcial';
   paymentMethod?: string;
   notes?: string;
   items?: PurchaseItem[];
   invoiceNumber?: string;
-  paidAmount?: number;
+  paidAmount?: number;    // ⚠️ DEPRECATED - usar paidAmountCents
+  paidAmountCents?: number; // ✅ PAGADO EN CÉNTIMOS DE BS
   itemsCount?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -225,10 +276,14 @@ export interface PurchaseItem {
   productId: number;
   productName: string;
   quantity: number;
-  costUsd: number;
-  costBs: number;
-  totalUsd: number;
-  totalBs: number;
+  costUsd: number;        // ⚠️ DEPRECATED - usar costUsdCents
+  costBs: number;         // ⚠️ DEPRECATED - usar costBsCents
+  costUsdCents: number;   // ✅ COSTO EN CÉNTIMOS DE USD
+  costBsCents: number;    // ✅ COSTO EN CÉNTIMOS DE BS
+  totalUsd: number;       // ⚠️ DEPRECATED - usar totalUsdCents
+  totalBs: number;        // ⚠️ DEPRECATED - usar totalBsCents
+  totalUsdCents: number;  // ✅ TOTAL EN CÉNTIMOS DE USD
+  totalBsCents: number;   // ✅ TOTAL EN CÉNTIMOS DE BS
   createdAt?: string;
   updatedAt?: string;
 }
@@ -240,10 +295,14 @@ export interface PurchaseInvoiceItem {
   productName: string;
   qty: number;
   quantity?: number;
-  costUsd: number;
-  costBs: number;
-  totalUsd: number;
-  totalBs: number;
+  costUsd: number;        // ⚠️ DEPRECATED - usar costUsdCents
+  costBs: number;         // ⚠️ DEPRECATED - usar costBsCents
+  costUsdCents: number;   // ✅ COSTO EN CÉNTIMOS DE USD
+  costBsCents: number;    // ✅ COSTO EN CÉNTIMOS DE BS
+  totalUsd: number;       // ⚠️ DEPRECATED - usar totalUsdCents
+  totalBs: number;        // ⚠️ DEPRECATED - usar totalBsCents
+  totalUsdCents: number;  // ✅ TOTAL EN CÉNTIMOS DE USD
+  totalBsCents: number;   // ✅ TOTAL EN CÉNTIMOS DE BS
   createdAt?: string;
   updatedAt?: string;
 }
@@ -253,9 +312,12 @@ export interface SupplierPayment {
   supplierId: number;
   supplierName: string;
   date: string;
-  amount: number;
-  amountUsd?: number;
-  exchangeRate: number;
+  amount: number;         // ⚠️ DEPRECATED - usar amountCents
+  amountUsd?: number;     // ⚠️ DEPRECATED - usar amountUsdCents
+  amountCents: number;    // ✅ MONTO EN CÉNTIMOS DE BS
+  amountUsdCents?: number; // ✅ MONTO EN CÉNTIMOS DE USD
+  exchangeRate: number;   // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA EN CÉNTIMOS
   method: string;
   invoiceId?: number;
   reference?: string;
@@ -273,7 +335,8 @@ export interface AccountingEntry {
   subcategory?: string;
   concept: string;
   description?: string;
-  amount: number;
+  amount: number;         // ⚠️ DEPRECATED - usar amountCents
+  amountCents: number;    // ✅ MONTO EN CÉNTIMOS DE BS
   referenceId?: string | number;
   referenceType?: string;
   createdAt?: string;
@@ -288,8 +351,10 @@ export interface KardexEntry {
   quantity: number;
   previousStock: number;
   newStock: number;
-  costUsd?: number;
-  costBs?: number;
+  costUsd?: number;       // ⚠️ DEPRECATED - usar costUsdCents
+  costBs?: number;        // ⚠️ DEPRECATED - usar costBsCents
+  costUsdCents?: number;  // ✅ COSTO EN CÉNTIMOS DE USD
+  costBsCents?: number;   // ✅ COSTO EN CÉNTIMOS DE BS
   reference: string;
   note?: string;
   createdAt?: string;
@@ -299,7 +364,8 @@ export interface KardexEntry {
 export type Page = 'pos' | 'products' | 'clients' | 'accounts' | 'admin' | 'terminal' | 'purchases' | 'reports' | 'caja' | 'dashboard' | 'inventario' | 'registrar_compra' | 'proveedores' | 'clientes' | 'cuentas' | 'contabilidad' | 'devoluciones';
 
 export interface GlobalSettings {
-  exchangeRate: number;
+  exchangeRate: number;   // ⚠️ DEPRECATED - usar exchangeRateCents
+  exchangeRateCents: number; // ✅ TASA EN CÉNTIMOS
   defaultIvaPercentage: number;
   adminCode: string;
   terminalId?: string;
@@ -343,7 +409,8 @@ export interface Expense {
   category: string;
   subcategory?: string;
   description: string;
-  amount: number;
+  amount: number;         // ⚠️ DEPRECATED - usar amountCents
+  amountCents: number;    // ✅ MONTO EN CÉNTIMOS DE BS
   paymentMethod: string;
   reference?: string;
   createdAt?: string;
@@ -365,7 +432,8 @@ export interface Income {
   category: string;
   subcategory?: string;
   description: string;
-  amount: number;
+  amount: number;         // ⚠️ DEPRECATED - usar amountCents
+  amountCents: number;    // ✅ MONTO EN CÉNTIMOS DE BS
   paymentMethod: string;
   reference?: string;
   createdAt?: string;
@@ -402,4 +470,23 @@ export function getCategoryName(category: Category | string): string {
     return found ? found.name : category;
   }
   return category.name;
+}
+
+// ============================================================
+// 🏦 FUNCIONES DE CONVERSIÓN PARA COMPATIBILIDAD
+// ============================================================
+
+/**
+ * Convierte un monto en céntimos a su representación decimal
+ * Útil para migración gradual
+ */
+export function centsToDecimal(cents: number): number {
+  return cents / 100;
+}
+
+/**
+ * Convierte un monto decimal a céntimos
+ */
+export function decimalToCents(amount: number): number {
+  return Math.round(amount * 100);
 }

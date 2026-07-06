@@ -75,37 +75,278 @@ export default function CierreFinalForm({ onClose, tasaActual }: CierreFinalForm
   const [morningRate, setMorningRate] = useState<number | null>(null);
   const [eveningRate, setEveningRate] = useState<number | null>(null);
 
-  const [ventasManana, setVentasManana] = useState<Record<string, { bs: number; usd: number }>>({});
-  const [vueltosManana, setVueltosManana] = useState<Record<string, number>>({});
-  const [ventasTarde, setVentasTarde] = useState<Record<string, { bs: number; usd: number }>>({});
-  const [vueltosTarde, setVueltosTarde] = useState<Record<string, number>>({});
-  const [devoluciones, setDevoluciones] = useState<Record<string, { bs: number; usd: number }>>({});
+  // ✅ Obtener transacciones de la sesión actual
+  const sessionTransactions = useMemo(() => {
+    if (!state.currentSession?.id) return [];
+    return state.transactions.filter(tx => tx.sessionId === state.currentSession?.id);
+  }, [state.transactions, state.currentSession]);
+
+  // ✅ CRITICAL FIX: Calcular ventas por método DIRECTAMENTE desde las transacciones
+  const salesByMethod = useMemo(() => {
+    const totalsBs: Record<string, number> = {};
+    const totalsUsd: Record<string, number> = {};
+    const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
+    methods.forEach(m => {
+      totalsBs[m] = 0;
+      totalsUsd[m] = 0;
+    });
+
+    if (sessionTransactions.length === 0) return { totalsBs, totalsUsd };
+
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
+
+      // ✅ Usar payMethod (correcto según types.ts)
+      const payMethod = tx.payMethod || 'efectivo_bs';
+      const normalizedMethod = payMethod === 'efectivo_usd' ? 'usd_efectivo' : payMethod;
+      const isUsd = normalizedMethod === 'usd_efectivo' || normalizedMethod === 'zelle';
+
+      // ✅ Para EFECTIVO BS, sumar DIRECTAMENTE del total
+      if (normalizedMethod === 'efectivo_bs') {
+        const amount = tx.total || 0;
+        totalsBs['efectivo_bs'] = (totalsBs['efectivo_bs'] || 0) + amount;
+        continue;
+      }
+
+      // ✅ Para otros métodos, intentar con payments
+      let payments: any[] = [];
+      if (tx.payments) {
+        payments = tx.payments;
+        if (typeof payments === 'string') {
+          try { payments = JSON.parse(payments); } catch(e) { payments = []; }
+        }
+        if (typeof payments === 'object' && !Array.isArray(payments) && payments !== null) {
+          const pObj = payments as any;
+          if (Object.keys(pObj).length > 0 && Object.keys(pObj).every(k => !isNaN(Number(k)))) {
+            payments = Object.values(pObj);
+          } else {
+            const m = pObj.method || 'efectivo_bs';
+            const amt = pObj.amount || 0;
+            const usdAmt = pObj.usdAmount || 0;
+            payments = [{ method: m, amount: amt, usdAmount: usdAmt }];
+          }
+        }
+      }
+
+      if (!Array.isArray(payments)) {
+        payments = [];
+      }
+
+      if (payments.length > 0) {
+        for (const p of payments) {
+          const pMethod = p.method || 'efectivo_bs';
+          const pNormalized = pMethod === 'efectivo_usd' ? 'usd_efectivo' : pMethod;
+          const pIsUsd = pNormalized === 'usd_efectivo' || pNormalized === 'zelle';
+          
+          if (pIsUsd) {
+            const usdAmount = p.usdAmount !== undefined ? p.usdAmount : (p.amount || 0);
+            totalsUsd[pNormalized] = (totalsUsd[pNormalized] || 0) + usdAmount;
+          } else {
+            const bsAmount = p.amount || 0;
+            totalsBs[pNormalized] = (totalsBs[pNormalized] || 0) + bsAmount;
+          }
+        }
+      } else if (isUsd) {
+        // ✅ Fallback para USD sin payments
+        const usdAmount = tx.totalUsd || 0;
+        totalsUsd[normalizedMethod] = (totalsUsd[normalizedMethod] || 0) + usdAmount;
+      } else {
+        // ✅ Fallback para otros métodos Bs sin payments
+        const bsAmount = tx.total || 0;
+        totalsBs[normalizedMethod] = (totalsBs[normalizedMethod] || 0) + bsAmount;
+      }
+    }
+
+    return { totalsBs, totalsUsd };
+  }, [sessionTransactions]);
+
+  // ✅ Separar ventas en mañana y tarde
+  const ventasManana = useMemo(() => {
+    const result: Record<string, { bs: number; usd: number }> = {};
+    const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
+    methods.forEach(m => result[m] = { bs: 0, usd: 0 });
+
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
+      const hour = getVenezuelaHour(tx.date);
+      if (hour >= 12) continue;
+
+      const payMethod = tx.payMethod || 'efectivo_bs';
+      const normalizedMethod = payMethod === 'efectivo_usd' ? 'usd_efectivo' : payMethod;
+      const isUsd = normalizedMethod === 'usd_efectivo' || normalizedMethod === 'zelle';
+
+      if (normalizedMethod === 'efectivo_bs') {
+        result['efectivo_bs'].bs += tx.total || 0;
+        continue;
+      }
+
+      let payments: any[] = [];
+      if (tx.payments) {
+        payments = tx.payments;
+        if (typeof payments === 'string') {
+          try { payments = JSON.parse(payments); } catch(e) { payments = []; }
+        }
+        if (typeof payments === 'object' && !Array.isArray(payments) && payments !== null) {
+          const pObj = payments as any;
+          if (Object.keys(pObj).length > 0 && Object.keys(pObj).every(k => !isNaN(Number(k)))) {
+            payments = Object.values(pObj);
+          } else {
+            const m = pObj.method || 'efectivo_bs';
+            const amt = pObj.amount || 0;
+            const usdAmt = pObj.usdAmount || 0;
+            payments = [{ method: m, amount: amt, usdAmount: usdAmt }];
+          }
+        }
+      }
+
+      if (!Array.isArray(payments)) {
+        payments = [];
+      }
+
+      if (payments.length > 0) {
+        for (const p of payments) {
+          const pMethod = p.method || 'efectivo_bs';
+          const pNormalized = pMethod === 'efectivo_usd' ? 'usd_efectivo' : pMethod;
+          const pIsUsd = pNormalized === 'usd_efectivo' || pNormalized === 'zelle';
+          if (pIsUsd) {
+            result[pNormalized].usd += p.usdAmount !== undefined ? p.usdAmount : (p.amount || 0);
+          } else {
+            result[pNormalized].bs += p.amount || 0;
+          }
+        }
+      } else if (isUsd) {
+        result[normalizedMethod].usd += tx.totalUsd || 0;
+      } else {
+        result[normalizedMethod].bs += tx.total || 0;
+      }
+    }
+    return result;
+  }, [sessionTransactions]);
+
+  const ventasTarde = useMemo(() => {
+    const result: Record<string, { bs: number; usd: number }> = {};
+    const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
+    methods.forEach(m => result[m] = { bs: 0, usd: 0 });
+
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
+      const hour = getVenezuelaHour(tx.date);
+      if (hour < 12) continue;
+
+      const payMethod = tx.payMethod || 'efectivo_bs';
+      const normalizedMethod = payMethod === 'efectivo_usd' ? 'usd_efectivo' : payMethod;
+      const isUsd = normalizedMethod === 'usd_efectivo' || normalizedMethod === 'zelle';
+
+      if (normalizedMethod === 'efectivo_bs') {
+        result['efectivo_bs'].bs += tx.total || 0;
+        continue;
+      }
+
+      let payments: any[] = [];
+      if (tx.payments) {
+        payments = tx.payments;
+        if (typeof payments === 'string') {
+          try { payments = JSON.parse(payments); } catch(e) { payments = []; }
+        }
+        if (typeof payments === 'object' && !Array.isArray(payments) && payments !== null) {
+          const pObj = payments as any;
+          if (Object.keys(pObj).length > 0 && Object.keys(pObj).every(k => !isNaN(Number(k)))) {
+            payments = Object.values(pObj);
+          } else {
+            const m = pObj.method || 'efectivo_bs';
+            const amt = pObj.amount || 0;
+            const usdAmt = pObj.usdAmount || 0;
+            payments = [{ method: m, amount: amt, usdAmount: usdAmt }];
+          }
+        }
+      }
+
+      if (!Array.isArray(payments)) {
+        payments = [];
+      }
+
+      if (payments.length > 0) {
+        for (const p of payments) {
+          const pMethod = p.method || 'efectivo_bs';
+          const pNormalized = pMethod === 'efectivo_usd' ? 'usd_efectivo' : pMethod;
+          const pIsUsd = pNormalized === 'usd_efectivo' || pNormalized === 'zelle';
+          if (pIsUsd) {
+            result[pNormalized].usd += p.usdAmount !== undefined ? p.usdAmount : (p.amount || 0);
+          } else {
+            result[pNormalized].bs += p.amount || 0;
+          }
+        }
+      } else if (isUsd) {
+        result[normalizedMethod].usd += tx.totalUsd || 0;
+      } else {
+        result[normalizedMethod].bs += tx.total || 0;
+      }
+    }
+    return result;
+  }, [sessionTransactions]);
+
+  // ✅ Devoluciones
+  const devoluciones = useMemo(() => {
+    const result: Record<string, { bs: number; usd: number }> = {};
+    const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
+    methods.forEach(m => result[m] = { bs: 0, usd: 0 });
+
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'devolucion') continue;
+
+      const method = tx.payMethod || 'efectivo_bs';
+      const normalizedMethod = method === 'efectivo_usd' ? 'usd_efectivo' : method;
+      const isUsd = normalizedMethod === 'usd_efectivo' || normalizedMethod === 'zelle';
+
+      if (isUsd) {
+        result[normalizedMethod].usd += tx.totalUsd || 0;
+      } else {
+        result[normalizedMethod].bs += tx.total || 0;
+      }
+    }
+    return result;
+  }, [sessionTransactions]);
+
+  // ✅ Vueltos (solo efectivo BS)
+  const vueltosManana = useMemo(() => {
+    const result: Record<string, number> = { efectivo_bs: 0 };
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
+      const hour = getVenezuelaHour(tx.date);
+      if (hour >= 12) continue;
+      result.efectivo_bs += tx.change || 0;
+    }
+    return result;
+  }, [sessionTransactions]);
+
+  const vueltosTarde = useMemo(() => {
+    const result: Record<string, number> = { efectivo_bs: 0 };
+    for (const tx of sessionTransactions) {
+      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
+      const hour = getVenezuelaHour(tx.date);
+      if (hour < 12) continue;
+      result.efectivo_bs += tx.change || 0;
+    }
+    return result;
+  }, [sessionTransactions]);
 
   const totalCreditoBs = useMemo(() => {
-    if (!reg?.txs) return 0;
-    const todayVzla = getVenezuelaToday();
-    const txDay = reg.txs.filter((t: any) => {
-      const txDate = new Date(t.date);
-      const formatter = new Intl.DateTimeFormat('fr-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
-      const txDateStr = formatter.format(txDate);
-      return txDateStr === todayVzla && t.type === 'credito';
-    });
-    return txDay.reduce((sum, t) => sum + t.total, 0);
-  }, [reg?.txs]);
+    return sessionTransactions
+      .filter((t: any) => t.type === 'credito')
+      .reduce((sum, t) => sum + (t.total || 0), 0);
+  }, [sessionTransactions]);
 
   const productStats = useMemo(() => {
-    if (!reg?.txs) return { items: [], total: 0, best: null };
-    const todayVzla = getVenezuelaToday();
-    const txDay = reg.txs.filter((t: any) => {
-      const txDate = new Date(t.date);
-      const formatter = new Intl.DateTimeFormat('fr-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
-      return formatter.format(txDate) === todayVzla && (t.type === 'contado' || t.type === 'credito' || t.type === 'colaboracion' || t.type === 'consumo_propio');
-    });
+    if (sessionTransactions.length === 0) return { items: [], total: 0, best: null };
+    
+    const txDay = sessionTransactions.filter((t: any) => 
+      t.type === 'contado' || t.type === 'credito' || t.type === 'colaboracion' || t.type === 'consumo_propio'
+    );
 
     const counts: Record<string, number> = {};
     let totalQty = 0;
 
-    txDay.forEach(tx => {
+    txDay.forEach((tx: any) => {
       let items = tx.items || [];
       if (typeof items === 'string') {
         try { items = JSON.parse(items); } catch(e) { items = []; }
@@ -124,143 +365,37 @@ export default function CierreFinalForm({ onClose, tasaActual }: CierreFinalForm
       total: totalQty,
       best: items.length > 0 ? items[0] : null
     };
-  }, [reg?.txs]);
+  }, [sessionTransactions]);
 
   const receiptRange = useMemo(() => {
-    if (!reg?.txs) return { first: '—', last: '—' };
-    const todayVzla = getVenezuelaToday();
-    const txDay = reg.txs.filter((t: any) => {
-      const txDate = new Date(t.date);
-      const formatter = new Intl.DateTimeFormat('fr-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
-      const types = ['contado', 'credito', 'colaboracion', 'consumo_propio', 'devolucion', 'cobro_deuda'];
-      return formatter.format(txDate) === todayVzla && types.includes(t.type);
-    });
+    if (sessionTransactions.length === 0) return { first: '—', last: '—' };
     
-    const nums = txDay.map(t => t.receiptNumber || (t as any).receipt_number).filter(n => typeof n === 'number');
+    const nums = sessionTransactions
+      .map((t: any) => t.receiptNumber || (t as any).receipt_number)
+      .filter((n: any) => typeof n === 'number');
     if (nums.length === 0) return { first: '—', last: '—' };
     
     return {
       first: Math.min(...nums).toString().padStart(8, '0'),
       last: Math.max(...nums).toString().padStart(8, '0')
     };
-  }, [reg?.txs]);
+  }, [sessionTransactions]);
 
+  // ✅ Calcular tasas de apertura y cierre
   useEffect(() => {
-    if (!reg?.txs) return;
-    const todayVzla = getVenezuelaToday();
-    const txDay = reg.txs.filter((t: any) => {
-      const txDate = new Date(t.date);
-      const formatter = new Intl.DateTimeFormat('fr-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
-      const txDateStr = formatter.format(txDate);
-      return txDateStr === todayVzla;
-    });
+    if (sessionTransactions.length === 0) return;
     
-    if (txDay.length === 0) {
-      const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
-      const empty = methods.reduce((acc, m) => ({ ...acc, [m]: { bs: 0, usd: 0 } }), {});
-      setVentasManana(empty);
-      setVueltosManana({ efectivo_bs: 0 });
-      setVentasTarde(empty);
-      setVueltosTarde({ efectivo_bs: 0 });
-      setDevoluciones(empty);
-      return;
-    }
-
     let firstRate: number | null = null;
     let lastRate: number | null = null;
-    const sortedByDate = [...txDay].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    for (const tx of sortedByDate) {
+    const sorted = [...sessionTransactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    for (const tx of sorted) {
       const rate = tx.exchangeRate || tasaActual;
       if (firstRate === null) firstRate = rate;
       lastRate = rate;
     }
     if (firstRate !== null) setMorningRate(firstRate);
     if (lastRate !== null) setEveningRate(lastRate);
-
-    const ventasAM: Record<string, { bs: number; usd: number }> = {};
-    const vueltosAM: Record<string, number> = {};
-    const ventasPM: Record<string, { bs: number; usd: number }> = {};
-    const vueltosPM: Record<string, number> = {};
-    const devolucionesTotales: Record<string, { bs: number; usd: number }> = {};
-    const methods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
-    methods.forEach(m => {
-      ventasAM[m] = { bs: 0, usd: 0 };
-      vueltosAM[m] = 0;
-      ventasPM[m] = { bs: 0, usd: 0 };
-      vueltosPM[m] = 0;
-      devolucionesTotales[m] = { bs: 0, usd: 0 };
-    });
-
-    for (const tx of txDay) {
-      const hour = getVenezuelaHour(tx.date);
-      const isMorning = hour < 12;
-
-      // ✅ PROCESAMIENTO ROBUSTO DE DEVOLUCIONES
-      if (tx.type === 'devolucion') {
-        let methodDetected = tx.payMethod || (tx as any).pay_method || (tx as any).returnMethod || 'efectivo_bs';
-        
-        // Normalización de claves para coincidir con la tabla de arqueo
-        if (methodDetected === 'efectivo') methodDetected = 'efectivo_bs';
-        if (methodDetected === 'efectivo_usd') methodDetected = 'usd_efectivo';
-
-        if (!devolucionesTotales[methodDetected]) {
-          devolucionesTotales[methodDetected] = { bs: 0, usd: 0 };
-        }
-
-        const isUsdMethod = methodDetected === 'usd_efectivo' || methodDetected === 'zelle';
-        
-        if (isUsdMethod) {
-          devolucionesTotales[methodDetected].usd += tx.totalUsd || (tx as any).total_usd || 0;
-        } else {
-          devolucionesTotales[methodDetected].bs += tx.total || 0;
-        }
-        continue;
-      }
-
-      if (tx.type !== 'contado' && tx.type !== 'cobro_deuda') continue;
-
-      if (tx.payments && Array.isArray(tx.payments) && tx.payments.length > 0) {
-        for (const payment of tx.payments) {
-          const method = payment.method;
-          if (!method) continue;
-          const isUsd = method === 'usd_efectivo' || method === 'zelle';
-          if (isUsd) {
-            const usdAmount = payment.usdAmount !== undefined ? payment.usdAmount : payment.amount;
-            if (isMorning) ventasAM[method].usd += usdAmount;
-            else ventasPM[method].usd += usdAmount;
-          } else {
-            const bsAmount = payment.amount || 0;
-            if (isMorning) ventasAM[method].bs += bsAmount;
-            else ventasPM[method].bs += bsAmount;
-          }
-        }
-      } else {
-        const method = (tx as any).pay_method || tx.payMethod || 'efectivo_bs';
-        const isUsd = method === 'usd_efectivo' || method === 'zelle';
-        if (isUsd) {
-          const usdAmount = (tx as any).total_usd || tx.totalUsd || 0;
-          if (isMorning) ventasAM[method].usd += usdAmount;
-          else ventasPM[method].usd += usdAmount;
-        } else {
-          const bsAmount = tx.type === 'cobro_deuda' ? (tx.paidBs || tx.total || 0) : (tx.total || 0);
-          if (isMorning) ventasAM[method].bs += bsAmount;
-          else ventasPM[method].bs += bsAmount;
-        }
-      }
-
-      const change = tx.change || 0;
-      if (change > 0) {
-        if (isMorning) vueltosAM['efectivo_bs'] += change;
-        else vueltosPM['efectivo_bs'] += change;
-      }
-    }
-
-    setVentasManana(ventasAM);
-    setVueltosManana(vueltosAM);
-    setVentasTarde(ventasPM);
-    setVueltosTarde(vueltosPM);
-    setDevoluciones(devolucionesTotales);
-  }, [reg, tasaActual]);
+  }, [sessionTransactions, tasaActual]);
 
   const aperturaBs = reg?.openAmountBs ?? 0;
   const aperturaUsd = reg?.openAmountUsd ?? 0;
@@ -268,30 +403,48 @@ export default function CierreFinalForm({ onClose, tasaActual }: CierreFinalForm
 
   const totalCashUsd = useMemo(() => {
     let total = aperturaUsd;
-    if (reg?.txs && Array.isArray(reg.txs)) {
-      const todayVzla = getVenezuelaToday();
-      reg.txs.forEach((t: any) => {
-        const txDate = new Date(t.date);
-        const formatter = new Intl.DateTimeFormat('fr-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit', day: '2-digit' });
-        if (formatter.format(txDate) !== todayVzla) return;
-        if (t.type === 'contado') {
-          if (t.payments) {
-            t.payments.forEach((p: any) => {
-              if (p.method === 'usd_efectivo') total += p.usdAmount !== undefined ? p.usdAmount : (p.amount || 0);
-            });
-          } else if (t.payMethod === 'usd_efectivo') {
-            total += t.totalUsd || 0;
+    for (const t of sessionTransactions) {
+      if (t.type === 'contado') {
+        let payments: any[] = [];
+        if (t.payments) {
+          payments = t.payments;
+          if (typeof payments === 'string') {
+            try { payments = JSON.parse(payments); } catch(e) { payments = []; }
           }
-        } else if (t.type === 'devolucion') {
-          const method = t.returnMethod || t.payMethod;
-          if (method === 'usd_efectivo' || method === 'efectivo_usd') {
-            total -= (t.totalUsd || 0);
+          if (typeof payments === 'object' && !Array.isArray(payments) && payments !== null) {
+            const pObj = payments as any;
+            if (Object.keys(pObj).length > 0 && Object.keys(pObj).every(k => !isNaN(Number(k)))) {
+              payments = Object.values(pObj);
+            } else {
+              const m = pObj.method || 'efectivo_bs';
+              const amt = pObj.amount || 0;
+              const usdAmt = pObj.usdAmount || 0;
+              payments = [{ method: m, amount: amt, usdAmount: usdAmt }];
+            }
           }
         }
-      });
+        if (!Array.isArray(payments)) {
+          payments = [];
+        }
+        if (payments.length > 0) {
+          for (const p of payments) {
+            if (p.method === 'usd_efectivo') {
+              total += p.usdAmount !== undefined ? p.usdAmount : (p.amount || 0);
+            }
+          }
+        } else if (t.payMethod === 'usd_efectivo') {
+          total += t.totalUsd || 0;
+        }
+      } else if (t.type === 'devolucion') {
+        // ✅ Para devoluciones en USD, restar
+        const method = t.payMethod || '';
+        if (method === 'usd_efectivo' || method === 'efectivo_usd') {
+          total -= (t.totalUsd || 0);
+        }
+      }
     }
     return total;
-  }, [reg, aperturaUsd]);
+  }, [sessionTransactions, aperturaUsd]);
 
   const baseMethods = ['efectivo_bs', 'usd_efectivo', 'tarjeta', 'biopago', 'pago_movil', 'zelle'];
   const paymentMethods = baseMethods.map(key => {

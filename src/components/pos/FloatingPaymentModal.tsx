@@ -3,20 +3,44 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, DollarSign, CreditCard, Banknote, Smartphone, Fingerprint, Plane, Plus, Trash2, Calculator } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { formatBs, formatUsd, formatUsdNumber } from '@/lib/currency-formatter';
+import { 
+  formatBs, 
+  formatUsd, 
+  formatUsdNumber,
+  toCentsBs,
+  toCentsUsd,
+  fromCentsBs,
+  fromCentsUsd,
+  parseCentsFromString,
+} from '@/lib/currency-formatter';
+
+// ✅ Función de redondeo local
+const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
 
 interface PaymentItem {
   id: string;
   method: string;
-  amount: number; // siempre en bolívares (Bs)
-  usdAmount?: number; // para métodos USD, el monto original en USD
+  amount: number;      // ⚠️ DEPRECATED - usar amountCents
+  usdAmount?: number;  // ⚠️ DEPRECATED - usar usdAmountCents
+  amountCents: number; // ✅ MONTO EN CÉNTIMOS (según moneda del método)
+  usdAmountCents?: number; // ✅ MONTO USD EN CÉNTIMOS
 }
 
 interface FloatingPaymentModalProps {
-  total: number;
+  total: number;       // ⚠️ DEPRECATED - usar totalCents
+  totalCents: number;  // ✅ TOTAL EN CÉNTIMOS DE BS
   exchangeRate: number;
   onClose: () => void;
-  onConfirm: (data: { payments: PaymentItem[]; totalPaid: number; change: number; method: string; ajusteRedondeoBs?: number }) => void;
+  onConfirm: (data: { 
+    payments: PaymentItem[]; 
+    totalPaid: number; 
+    totalPaidCents: number;
+    change: number; 
+    changeCents: number;
+    method: string; 
+    ajusteRedondeoBs?: number;
+    ajusteRedondeoBsCents?: number;
+  }) => void;
 }
 
 const methods = [
@@ -28,7 +52,13 @@ const methods = [
   { id: 'zelle', label: 'ZELLE', icon: Plane, currency: 'USD' },
 ];
 
-export default function FloatingPaymentModal({ total, exchangeRate, onClose, onConfirm }: FloatingPaymentModalProps) {
+export default function FloatingPaymentModal({ 
+  total, 
+  totalCents, 
+  exchangeRate, 
+  onClose, 
+  onConfirm 
+}: FloatingPaymentModalProps) {
   const [payments, setPayments] = useState<PaymentItem[]>([]);
   const [currentMethod, setCurrentMethod] = useState('efectivo_bs');
   const [inputValue, setInputValue] = useState('');
@@ -38,26 +68,48 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
   const currentMethodObj = methods.find(m => m.id === currentMethod);
   const isUsd = currentMethodObj?.currency === 'USD';
 
-  const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
+  // ✅ Total pagado en céntimos
+  const totalPaidCents = payments.reduce((sum, p) => sum + (p.amountCents || toCentsBs(p.amount)), 0);
+  const totalPaid = fromCentsBs(totalPaidCents);
   
-  // Reconciliación bimonetaria
-  const totalUsd = Math.round((total / exchangeRate) * 100) / 100;
-  const totalPaidUsd = payments.reduce((sum, p) => sum + (p.usdAmount || (p.amount / exchangeRate)), 0);
+  // ✅ RECONCILIACIÓN BIMONETARIA EXACTA EN CÉNTIMOS
+  const totalUsdCents = Math.round((totalCents * 100) / Math.round(exchangeRate * 100));
+  const totalUsd = fromCentsUsd(totalUsdCents);
+  
+  const totalPaidUsdCents = payments.reduce((sum, p) => {
+    if (p.usdAmountCents) return sum + p.usdAmountCents;
+    // Si no tiene usdAmountCents, calcular desde amountCents
+    const amountCents = p.amountCents || toCentsBs(p.amount);
+    return sum + Math.round((amountCents * 100) / Math.round(exchangeRate * 100));
+  }, 0);
+  const totalPaidUsd = fromCentsUsd(totalPaidUsdCents);
 
-  // Una factura se considera pagada si:
-  // 1. La suma en USD cubre el total en USD (tolerancia de 0.001 para errores de punto flotante)
-  // 2. La suma en Bs cubre el total en Bs
-  const isPaidByUsd = totalPaidUsd >= (totalUsd - 0.001);
-  const isFullyPaid = isPaidByUsd || (totalPaid >= total - 0.01);
+  // ✅ Una factura se considera pagada si la suma en USD cubre el total en USD
+  // o si la suma en Bs cubre el total en Bs
+  const isPaidByUsd = totalPaidUsdCents >= (totalUsdCents - 1); // Tolerancia de 1 céntimo
+  const isFullyPaid = isPaidByUsd || (totalPaidCents >= totalCents - 1); // Tolerancia de 1 céntimo
 
-  const remaining = isFullyPaid ? 0 : Math.max(0, total - totalPaid);
-  const change = Math.max(0, totalPaid - total);
+  const remainingCents = isFullyPaid ? 0 : Math.max(0, totalCents - totalPaidCents);
+  const remaining = fromCentsBs(remainingCents);
+  
+  // ✅ LÓGICA DE VUELTO RECONCILIADO EN CÉNTIMOS
+  let changeCents = Math.max(0, totalPaidCents - totalCents);
+  
+  // Si el pago en USD es IDÉNTICO al total en USD (margen de 1 céntimo), 
+  // forzamos el vuelto a 0 si la diferencia en Bs es despreciable (error de redondeo)
+  if (isPaidByUsd && Math.abs(totalPaidUsdCents - totalUsdCents) <= 1 && changeCents <= 5) {
+    changeCents = 0;
+  }
+  
+  const change = fromCentsBs(changeCents);
   
   // Si está pagado por USD pero faltan céntimos en Bs, calculamos el ajuste
-  const ajusteRedondeoBs = (isPaidByUsd && totalPaid < total) ? Math.round((total - totalPaid) * 100) / 100 : 0;
+  const ajusteRedondeoBsCents = (isPaidByUsd && totalPaidCents < totalCents) ? (totalCents - totalPaidCents) : 0;
+  const ajusteRedondeoBs = fromCentsBs(ajusteRedondeoBsCents);
 
   // BLINDAJE VISUAL: Si ya se pagó exacto en USD, forzamos a la interfaz a mostrar que se pagó el 100% en Bs
-  const displayedTotalPaidBs = (isPaidByUsd && ajusteRedondeoBs > 0) ? total : totalPaid;
+  const displayedTotalPaidBsCents = (isPaidByUsd && (ajusteRedondeoBsCents > 0 || (totalPaidCents > totalCents && changeCents === 0))) ? totalCents : totalPaidCents;
+  const displayedTotalPaidBs = fromCentsBs(displayedTotalPaidBsCents);
 
   const addPayment = () => {
     let rawAmount = parseFloat(inputValue);
@@ -65,20 +117,26 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
 
     if (isUsd) {
       const usdAmount = rawAmount;
-      const bsAmount = Math.round(usdAmount * exchangeRate * 100) / 100;
+      const usdAmountCents = toCentsUsd(usdAmount);
+      const bsAmountCents = Math.round((usdAmountCents * Math.round(exchangeRate * 100)) / 100);
+      const bsAmount = fromCentsBs(bsAmountCents);
       const newPayment: PaymentItem = {
         id: crypto.randomUUID(),
         method: currentMethod,
         amount: bsAmount,
         usdAmount: usdAmount,
+        amountCents: bsAmountCents,
+        usdAmountCents: usdAmountCents,
       };
       setPayments([...payments, newPayment]);
     } else {
       const bsAmount = rawAmount;
+      const bsAmountCents = toCentsBs(bsAmount);
       const newPayment: PaymentItem = {
         id: crypto.randomUUID(),
         method: currentMethod,
         amount: bsAmount,
+        amountCents: bsAmountCents,
       };
       setPayments([...payments, newPayment]);
     }
@@ -91,16 +149,16 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
   };
 
   const setExactAmount = () => {
-    const currentRemainingBs = Math.max(0, total - totalPaid);
-    if (currentRemainingBs <= 0) return;
+    const currentRemainingCents = Math.max(0, totalCents - totalPaidCents);
+    if (currentRemainingCents <= 0) return;
     
-    let amountToAdd = currentRemainingBs;
+    let amountToAdd = fromCentsBs(currentRemainingCents);
     if (isUsd) {
       // Si no hay pagos cargados, usamos directamente el total en USD calculado
       if (payments.length === 0) {
-        amountToAdd = totalUsd;
+        amountToAdd = fromCentsUsd(totalUsdCents);
       } else {
-        amountToAdd = Math.round((currentRemainingBs / exchangeRate) * 100) / 100;
+        amountToAdd = fromCentsUsd(Math.round((currentRemainingCents * 100) / Math.round(exchangeRate * 100)));
       }
     }
     setInputValue(amountToAdd.toFixed(2));
@@ -110,15 +168,28 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
     if (!isFullyPaid) return;
     setIsProcessing(true);
     const mainPayment = payments[0] || { method: 'efectivo_bs' };
+    
+    // Aplicar la misma lógica de redondeo exacto al confirmar
+    let finalChangeCents = Math.max(0, totalPaidCents - totalCents);
+    if (isPaidByUsd && Math.abs(totalPaidUsdCents - totalUsdCents) <= 1 && finalChangeCents <= 5) {
+      finalChangeCents = 0;
+    }
+    
+    const finalChange = fromCentsBs(finalChangeCents);
+    const finalTotalPaid = fromCentsBs(totalPaidCents);
+
     onConfirm({ 
       payments, 
-      totalPaid, 
-      change, 
+      totalPaid: finalTotalPaid,
+      totalPaidCents: totalPaidCents,
+      change: finalChange,
+      changeCents: finalChangeCents,
       method: mainPayment.method,
-      ajusteRedondeoBs 
+      ajusteRedondeoBs,
+      ajusteRedondeoBsCents,
     });
     setIsProcessing(false);
-  }, [payments, totalPaid, isFullyPaid, change, ajusteRedondeoBs, onConfirm]);
+  }, [payments, totalPaidCents, totalCents, isFullyPaid, isPaidByUsd, totalPaidUsdCents, totalUsdCents, ajusteRedondeoBs, ajusteRedondeoBsCents, onConfirm]);
 
   // Atajos de teclado
   useEffect(() => {
@@ -146,7 +217,7 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
   const formatPaymentAmount = (payment: PaymentItem) => {
     const methodInfo = methods.find(m => m.id === payment.method);
     if (methodInfo?.currency === 'USD') {
-      const usdValue = payment.usdAmount ?? payment.amount / exchangeRate;
+      const usdValue = payment.usdAmount ?? fromCentsUsd(payment.usdAmountCents || 0);
       return formatUsd(usdValue);
     }
     return formatBs(payment.amount);
@@ -181,7 +252,6 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
           </div>
           <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 rounded-xl text-center shadow-sm">
             <span className="text-[10px] font-black text-green-700 uppercase tracking-wider">Pagado</span>
-            {/* Aquí usamos el monto blindado para que coincida perfectamente en pantalla */}
             <p className="text-3xl font-black mt-1 text-green-700">{formatBs(displayedTotalPaidBs)}</p>
             {totalPaidUsd > 0 && <p className="text-xs font-bold text-green-600 mt-0.5">USD {formatUsdNumber(totalPaidUsd)}</p>}
           </div>
@@ -261,25 +331,25 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
           </button>
         </div>
 
-        {/* Banner de respuesta dinámica con cn() para alternar colores según el estado de la cuenta */}
+        {/* Banner de respuesta dinámica */}
         <div className={cn(
           "rounded-xl p-2.5 text-center border transition-colors",
-          remaining > 0 ? "bg-red-50 border-red-200" : "bg-green-50 border-green-200"
+          remainingCents > 0 ? "bg-red-50 border-red-200" : "bg-green-50 border-green-200"
         )}>
-          {remaining > 0 ? (
+          {remainingCents > 0 ? (
             <>
               <p className="text-[9px] font-black text-red-700 uppercase tracking-wider">Faltante</p>
               <p className="text-3xl font-black text-red-700 mt-0.5">{formatBs(remaining)}</p>
               <p className="text-sm font-bold text-red-600 mt-0.5">≈ {formatUsd(remaining / exchangeRate)}</p>
             </>
-          ) : change > 0 ? (
+          ) : changeCents > 0 ? (
             <>
               <p className="text-[9px] font-black text-green-700 uppercase tracking-wider">Vuelto en Bs</p>
               <p className="text-3xl font-black text-green-700 mt-0.5">{formatBs(change)}</p>
               <p className="text-sm font-bold text-green-600 mt-0.5">≈ {formatUsd(change / exchangeRate)}</p>
             </>
           ) : (
-            <p className="text-sm font-black text-green-700 py-1">Pago cubierto</p>
+            <p className="text-sm font-black text-green-700 py-1">✅ Pago exacto - Sin vuelto</p>
           )}
         </div>
 
@@ -291,7 +361,7 @@ export default function FloatingPaymentModal({ total, exchangeRate, onClose, onC
             isFullyPaid ? "bg-[#2ECC71] hover:brightness-110 shadow-md" : "bg-gray-400 cursor-not-allowed"
           )}
         >
-          {isProcessing ? "Procesando..." : (change > 0 ? `COMPLETAR - Vuelto ${formatBs(change)}` : "COMPLETAR PAGO")}
+          {isProcessing ? "Procesando..." : (changeCents > 0 ? `COMPLETAR - Vuelto ${formatBs(change)}` : "COMPLETAR PAGO")}
         </button>
         <p className="text-center text-[8px] text-black/40">
           ␣ Espacio para finalizar | ESC para cerrar | Enter agrega monto

@@ -11,6 +11,9 @@ import { Button } from '@/components/ui/button';
 import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
 import ReceiptModal from '@/components/receipt-modal';
 
+// ✅ Función para convertir decimal a céntimos
+const decimalToCents = (amount: number): number => Math.round(amount * 100);
+
 interface ClientPanelProps {
   client: Client;
   state: ReturnType<typeof usePOSState>;
@@ -45,7 +48,7 @@ export default function ClientPanel({ client, state, onClose }: ClientPanelProps
   const clientAccounts = useMemo(() => {
     return state.accounts
       .filter(a => a.clientId === client.id)
-      .sort((a, b) => new Date(a.date).getTime() - new Date(a.date).getTime());
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [state.accounts, client.id]);
 
   const totalDebt = useMemo(() => {
@@ -330,10 +333,11 @@ export default function ClientPanel({ client, state, onClose }: ClientPanelProps
       {showPaymentModal && (
         <FloatingPaymentModal 
           total={paymentAmount}
+          totalCents={decimalToCents(paymentAmount)}
           exchangeRate={state.exchangeRate}
           onClose={() => {
             setShowPaymentModal(false);
-            setIsProcessing(false); // Re-enable button on close
+            setIsProcessing(false);
           }}
           onConfirm={handlePaymentConfirm}
         />

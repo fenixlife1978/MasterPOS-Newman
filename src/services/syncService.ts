@@ -56,20 +56,71 @@ function processId(id: string): string | number {
   return isNaN(Number(id)) ? id : Number(id);
 }
 
+// ============================================================
+// 🛡️ SANITIZACIÓN DE DATOS PARA FIREBASE
+// ============================================================
+
+/**
+ * Convierte un valor a número, evitando NaN
+ */
+function sanitizeNumber(value: any, defaultValue: number = 0): number {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  return (typeof num === 'number' && !isNaN(num)) ? num : defaultValue;
+}
+
+/**
+ * Limpia un objeto completo, reemplazando NaN por 0
+ * y eliminando undefined
+ */
 function cleanForFirebase(obj: any): any {
   if (obj === undefined) return null;
   if (obj === null) return null;
+  
   if (Array.isArray(obj)) {
     return obj.map(item => cleanForFirebase(item));
   }
+  
   if (typeof obj === 'object') {
     const cleaned: any = {};
     for (const [key, value] of Object.entries(obj)) {
-      cleaned[key] = cleanForFirebase(value);
+      // Si es un número y es NaN, lo convertimos a 0
+      if (typeof value === 'number' && isNaN(value)) {
+        cleaned[key] = 0;
+        console.warn(`⚠️ Se encontró NaN en ${key}, reemplazando por 0`);
+      } else {
+        cleaned[key] = cleanForFirebase(value);
+      }
     }
     return cleaned;
   }
+  
   return obj;
+}
+
+/**
+ * Sanitiza específicamente una cuenta para evitar NaN
+ */
+function sanitizeAccount(account: any): any {
+  return {
+    ...account,
+    // Campos numéricos críticos
+    paidAmount: sanitizeNumber(account.paidAmount),
+    totalAmount: sanitizeNumber(account.totalAmount),
+    balance: sanitizeNumber(account.balance),
+    discount: sanitizeNumber(account.discount),
+    subtotal: sanitizeNumber(account.subtotal),
+    tax: sanitizeNumber(account.tax),
+    amountBs: sanitizeNumber(account.amountBs),
+    amountUsd: sanitizeNumber(account.amountUsd),
+    paidAmountUsd: sanitizeNumber(account.paidAmountUsd),
+    // También sanitizar campos anidados si existen
+    payments: account.payments ? account.payments.map((p: any) => ({
+      ...p,
+      amount: sanitizeNumber(p.amount),
+      usdAmount: sanitizeNumber(p.usdAmount)
+    })) : []
+  };
 }
 
 /**
@@ -77,10 +128,7 @@ function cleanForFirebase(obj: any): any {
  * se extraigan correctamente (maneja snake_case y camelCase).
  */
 function parseProductData(id: string, p: any) {
-  const parseNum = (v: any) => {
-    const n = parseFloat(v);
-    return isNaN(n) ? 0 : n;
-  };
+  const parseNum = (v: any) => sanitizeNumber(v);
 
   return {
     id: processId(id) as number,
@@ -139,7 +187,7 @@ export async function saveUser(user: any) {
   };
   
   await setDoc(doc(firestoreDb, USERS_COLLECTION, userId), userData, { merge: true });
-  await set(ref(rtdb, `users/${userId}`), userData);
+  await set(ref(rtdb, `users/${userId}`), cleanForFirebase(userData));
   return { id: userId, ...userData };
 }
 
@@ -175,7 +223,7 @@ export async function updateUserTerminalId(userId: string, terminalId: string | 
   if (terminalName !== null) updateData.terminalName = terminalName;
   
   await updateDoc(doc(firestoreDb, USERS_COLLECTION, userId), updateData);
-  await update(ref(rtdb, `users/${userId}`), updateData);
+  await update(ref(rtdb, `users/${userId}`), cleanForFirebase(updateData));
 }
 
 // ============================================================
@@ -211,12 +259,12 @@ export async function saveProduct(product: any) {
     activo: product.activo !== undefined ? (product.activo ? 1 : 0) : 1,
     updatedAt: new Date().toISOString()
   };
-  await set(ref(rtdb, `products/${productId}`), productData);
+  await set(ref(rtdb, `products/${productId}`), cleanForFirebase(productData));
   return productData;
 }
 
 export async function deleteProduct(id: number) {
-  await update(ref(rtdb, `products/${id}`), { activo: 0, updatedAt: new Date().toISOString() });
+  await update(ref(rtdb, `products/${id}`), cleanForFirebase({ activo: 0, updatedAt: new Date().toISOString() }));
 }
 
 // ============================================================
@@ -287,7 +335,7 @@ export async function saveClient(client: any) {
     id: processId(String(id)),
     updatedAt: new Date().toISOString()
   };
-  await set(ref(rtdb, `clients/${id}`), clientData);
+  await set(ref(rtdb, `clients/${id}`), cleanForFirebase(clientData));
   return clientData;
 }
 
@@ -296,7 +344,7 @@ export async function deleteClient(id: number) {
 }
 
 // ============================================================
-// CUENTAS (RTDB)
+// CUENTAS (RTDB) - CORREGIDO CON SANITIZACIÓN
 // ============================================================
 
 export async function getAllAccounts() {
@@ -315,14 +363,34 @@ export async function getAllAccounts() {
 
 export async function saveAccount(account: any) {
   const id = account.id || generateId();
+  
+  // 🛡️ SANITIZAR LA CUENTA COMPLETA
+  const sanitized = sanitizeAccount(account);
+  
+  // 🔥 ASEGURAR QUE paidAmount NUNCA SEA NaN
+  const finalPaidAmount = sanitizeNumber(sanitized.paidAmount);
+  const finalTotalAmount = sanitizeNumber(sanitized.totalAmount || sanitized.amountBs);
+  const finalBalance = sanitizeNumber(finalTotalAmount - finalPaidAmount);
+  
   const accountData = {
-    ...account,
+    ...sanitized,
     id: processId(String(id)),
     clientId: processId(String(account.clientId)),
+    paidAmount: finalPaidAmount,
+    totalAmount: finalTotalAmount,
+    balance: finalBalance,
+    amountBs: finalTotalAmount,
     updatedAt: new Date().toISOString()
   };
-  await set(ref(rtdb, `accounts/${id}`), accountData);
-  return accountData;
+  
+  // 🔍 Log para debugging (opcional, se puede quitar después)
+  console.log('💾 Guardando cuenta:', JSON.stringify(accountData, null, 2));
+  
+  // Limpieza final para Firebase
+  const finalData = cleanForFirebase(accountData);
+  
+  await set(ref(rtdb, `accounts/${id}`), finalData);
+  return finalData;
 }
 
 export async function deleteAccount(accountId: string) {
@@ -355,8 +423,9 @@ export async function getAllSuppliers() {
 
 export async function saveSupplier(supplier: any) {
   const id = supplier.id || generateId();
-  await set(ref(rtdb, `suppliers/${id}`), { ...supplier, id, updatedAt: new Date().toISOString() });
-  return { ...supplier, id };
+  const data = { ...supplier, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `suppliers/${id}`), cleanForFirebase(data));
+  return data;
 }
 
 export async function deleteSupplier(id: number) {
@@ -378,22 +447,16 @@ export async function getAllPurchaseInvoices() {
 
 export async function savePurchaseInvoice(invoice: any) {
   const id = invoice.id || generateId();
-  await set(ref(rtdb, `purchase_invoices/${id}`), { 
-    ...invoice, 
-    id, 
-    updatedAt: new Date().toISOString() 
-  });
+  const data = { ...invoice, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `purchase_invoices/${id}`), cleanForFirebase(data));
   return invoice;
 }
 
 export async function savePurchaseInvoiceItems(invoiceId: number, items: any[]) {
   for (const item of items) {
     const itemId = item.id || generateId();
-    await set(ref(rtdb, `purchase_items/${itemId}`), { 
-      ...item, 
-      invoiceId, 
-      updatedAt: new Date().toISOString() 
-    });
+    const data = { ...item, invoiceId, updatedAt: new Date().toISOString() };
+    await set(ref(rtdb, `purchase_items/${itemId}`), cleanForFirebase(data));
   }
 }
 
@@ -412,11 +475,8 @@ export async function getAllPurchaseItems() {
 
 export async function saveSupplierPayment(payment: any) {
   const id = payment.id || generateId();
-  await set(ref(rtdb, `supplier_payments/${id}`), { 
-    ...payment, 
-    id, 
-    updatedAt: new Date().toISOString() 
-  });
+  const data = { ...payment, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `supplier_payments/${id}`), cleanForFirebase(data));
   return payment;
 }
 
@@ -443,13 +503,17 @@ export async function getAllSupplierPayments() {
 
 export async function saveAccountingEntry(entry: any) {
   const id = entry.id || generateId();
-  await set(ref(rtdb, `accounting_entries/${id}`), { ...entry, id, updatedAt: new Date().toISOString() });
+  const data = { ...entry, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `accounting_entries/${id}`), cleanForFirebase(data));
 }
 
 export async function saveAccountingBatch(entries: any[]) {
   const batch: any = {};
-  entries.forEach(e => { batch[e.id || generateId()] = { ...e, updatedAt: new Date().toISOString() }; });
-  await update(ref(rtdb, 'accounting_entries'), batch);
+  entries.forEach(e => { 
+    const id = e.id || generateId();
+    batch[id] = { ...e, id, updatedAt: new Date().toISOString() };
+  });
+  await update(ref(rtdb, 'accounting_entries'), cleanForFirebase(batch));
 }
 
 export async function getAllAccountingEntries() {
@@ -463,7 +527,8 @@ export async function getAllAccountingEntries() {
 export async function saveKardexEntry(entry: any) {
   const id = entry.id || generateId();
   const cleanId = String(id).replace(/[.#$[\]]/g, '_');
-  await set(ref(rtdb, `kardex_entries/${cleanId}`), { ...entry, id: cleanId, updatedAt: new Date().toISOString() });
+  const data = { ...entry, id: cleanId, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `kardex_entries/${cleanId}`), cleanForFirebase(data));
 }
 
 export async function saveKardexBatch(entries: any[]) {
@@ -472,7 +537,7 @@ export async function saveKardexBatch(entries: any[]) {
     const cleanId = String(e.id || generateId()).replace(/[.#$[\]]/g, '_');
     batch[cleanId] = { ...e, id: cleanId, updatedAt: new Date().toISOString() };
   });
-  await update(ref(rtdb, 'kardex_entries'), batch);
+  await update(ref(rtdb, 'kardex_entries'), cleanForFirebase(batch));
 }
 
 export async function getAllKardexEntries() {
@@ -497,11 +562,12 @@ export async function getRegisterByTerminal(terminalId: string) {
 }
 
 export async function saveRegisterByTerminal(terminalId: string, register: any) {
-  await set(ref(rtdb, `registers/${terminalId}`), cleanForFirebase({
+  const data = {
     ...register,
     isOpen: register.isOpen ? 1 : 0,
     updatedAt: new Date().toISOString()
-  }));
+  };
+  await set(ref(rtdb, `registers/${terminalId}`), cleanForFirebase(data));
 }
 
 export async function getAllCashCloses() {
@@ -514,7 +580,8 @@ export async function getAllCashCloses() {
 
 export async function saveCashClose(close: any) {
   const id = close.id || generateId();
-  await set(ref(rtdb, `cash_closes/${id}`), { ...close, id, updatedAt: new Date().toISOString() });
+  const data = { ...close, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `cash_closes/${id}`), cleanForFirebase(data));
 }
 
 export async function deleteCashClose(id: string) {
@@ -535,7 +602,8 @@ export async function getAllTerminals() {
 
 export async function saveTerminal(terminal: any) {
   const id = terminal.id || generateId();
-  await set(ref(rtdb, `terminals/${id}`), { ...terminal, id, updatedAt: new Date().toISOString() });
+  const data = { ...terminal, id, updatedAt: new Date().toISOString() };
+  await set(ref(rtdb, `terminals/${id}`), cleanForFirebase(data));
 }
 
 export async function deleteTerminal(id: string) {
@@ -543,7 +611,8 @@ export async function deleteTerminal(id: string) {
 }
 
 export async function updateTerminalBlockStatus(id: string, isBlocked: boolean) {
-  await update(ref(rtdb, `terminals/${id}`), { isBlocked, updatedAt: new Date().toISOString() });
+  const data = { isBlocked, updatedAt: new Date().toISOString() };
+  await update(ref(rtdb, `terminals/${id}`), cleanForFirebase(data));
 }
 
 // ============================================================
@@ -556,7 +625,8 @@ export async function getGlobalSettings() {
 }
 
 export async function saveGlobalSettings(settings: any) {
-  await update(ref(rtdb, 'global_settings'), { ...settings, updatedAt: new Date().toISOString() });
+  const data = { ...settings, updatedAt: new Date().toISOString() };
+  await update(ref(rtdb, 'global_settings'), cleanForFirebase(data));
 }
 
 export async function getAdminCode() {
@@ -735,7 +805,7 @@ export async function runAtomicSale(terminalId: string, transaction: any, update
     await saveTransaction(transaction);
     if (updates.products) {
       for (const [id, data] of updates.products.entries()) {
-        await update(ref(rtdb, `products/${id}`), { stock: (data as any).newStock, updatedAt: new Date().toISOString() });
+        await update(ref(rtdb, `products/${id}`), cleanForFirebase({ stock: (data as any).newStock, updatedAt: new Date().toISOString() }));
       }
     }
     if (updates.kardexEntries) {

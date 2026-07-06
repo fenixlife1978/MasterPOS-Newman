@@ -1,12 +1,45 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Product, Client, Transaction, Account, CashRegister, Page, CartItem, KitComponent } from '@/lib/types';
+import { Product, Client, Transaction, Account, CashRegister, Page, CartItem, KitComponent, Payment } from '@/lib/types';
 import syncService from '@/services/syncService';
 import { useAuth } from '@/context/AuthContext';
+import {
+  toCentsBs,
+  toCentsUsd,
+  fromCentsBs,
+  fromCentsUsd,
+  sumCents,
+  subCents,
+  mulCents,
+  divCents,
+  centsBsToCentsUsd,
+  centsUsdToCentsBs,
+  parseCentsFromString,
+  formatCentsBs,
+  formatCentsUsd,
+} from '@/lib/currency-formatter';
 
+// ============================================================
+// 🏦 CONSTANTES EN CÉNTIMOS
+// ============================================================
+const IVA_PERCENT_CENTS = 1600; // 16.00% en céntimos (16 * 100)
+const IVA_PERCENT_DECIMAL = 0.16; // Para compatibilidad
+
+// ============================================================
+// 🏦 FUNCIONES DE UTILIDAD EN CÉNTIMOS
+// ============================================================
 const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
-const roundTo4 = (num: number): number => Math.round(num * 10000) / 10000;
+
+// ✅ Convertir tasa de cambio a céntimos (ej: 667.23 → 66723)
+const rateToCents = (rate: number): number => Math.round(rate * 100);
+
+// ✅ Convertir céntimos de tasa a decimal (ej: 66723 → 667.23)
+const rateFromCents = (rateCents: number): number => rateCents / 100;
+
+// ✅ Funciones de conversión locales (reemplazan las importaciones faltantes)
+const centsToDecimal = (cents: number): number => cents / 100;
+const decimalToCents = (amount: number): number => Math.round(amount * 100);
 
 function getVenezuelaISOString(): string {
   const formatter = new Intl.DateTimeFormat('sv-SE', {
@@ -35,9 +68,7 @@ const STORAGE_KEYS = {
 
 export function usePOSState() {
   const { user, activeSession: authActiveSession, setActiveSession } = useAuth();
-  // ✅ Identificador técnico para rutas de base de datos
   const terminalId = user?.terminalId || 'default';
-  // ✅ Identificador legible para registros de auditoría y transacciones
   const terminalNameId = user?.terminalName || user?.terminalId || 'default';
   
   const registerRef = useRef<CashRegister | null>(null);
@@ -72,18 +103,25 @@ export function usePOSState() {
   const recalcAllPricesWithNewRate = useCallback((newRate: number) => {
     if (products.length === 0) return;
     
+    const rateCents = rateToCents(newRate);
+    
     setProducts(prevProducts => 
       prevProducts.map(product => {
         if (product.isPriceFixed) {
           return {
             ...product,
+            priceBs: product.priceUsd ? roundTo2(product.priceUsd * newRate) : product.priceBs,
+            priceBsCents: product.priceUsdCents ? Math.round((product.priceUsdCents * rateCents) / 100) : product.priceBsCents,
             costBs: product.costUsd ? roundTo2(product.costUsd * newRate) : product.costBs,
+            costBsCents: product.costUsdCents ? Math.round((product.costUsdCents * rateCents) / 100) : product.costBsCents,
           };
         }
         return {
           ...product,
           priceBs: roundTo2(product.priceUsd * newRate),
+          priceBsCents: Math.round((product.priceUsdCents * rateCents) / 100),
           costBs: product.costUsd ? roundTo2(product.costUsd * newRate) : undefined,
+          costBsCents: product.costUsdCents ? Math.round((product.costUsdCents * rateCents) / 100) : undefined,
         };
       })
     );
@@ -97,88 +135,87 @@ export function usePOSState() {
         return {
           ...item,
           priceBs: roundTo2(item.priceUsd * newRate),
+          priceBsCents: Math.round((item.priceUsdCents * rateCents) / 100),
         };
       })
     );
   }, [products]);
 
   useEffect(() => {
-    if (!user) {
-      if (stockUnsubscribeRef.current) {
-        stockUnsubscribeRef.current();
-        stockUnsubscribeRef.current = null;
+      if (!user) {
+          if (stockUnsubscribeRef.current) {
+              stockUnsubscribeRef.current();
+              stockUnsubscribeRef.current = null;
+          }
+          syncService.unsubscribeAll();
+          setProducts([]);
+          setClients([]);
+          setTransactions([]);
+          setAccounts([]);
+          setRegister(null);
+          registerRef.current = null;
+          setCurrentSession(null);
+          setCart([]);
+          localStorage.removeItem(`${STORAGE_KEYS.POS_REGISTER}_${terminalId}`);
       }
-      syncService.unsubscribeAll();
-      setProducts([]);
-      setClients([]);
-      setTransactions([]);
-      setAccounts([]);
-      setRegister(null);
-      registerRef.current = null;
-      setCurrentSession(null);
-      setCart([]);
-      localStorage.removeItem(`${STORAGE_KEYS.POS_REGISTER}_${terminalId}`);
-    }
   }, [user, terminalId]);
 
   useEffect(() => {
-    if (isUpdatingRef.current) return;
-    isUpdatingRef.current = true;
-    
-    const cachedRegister = localStorage.getItem(`${STORAGE_KEYS.POS_REGISTER}_${terminalId}`);
-    if (cachedRegister) {
-      try { 
-        const parsed = JSON.parse(cachedRegister);
-        setRegister(parsed);
-        registerRef.current = parsed;
-      } catch (e) {}
-    }
-    const cachedRate = localStorage.getItem(STORAGE_KEYS.EXCHANGE_RATE);
-    if (cachedRate) {
-      const rate = parseFloat(cachedRate);
-      if (!isNaN(rate)) setExchangeRate(rate);
-    }
-    
-    isUpdatingRef.current = false;
+      if (isUpdatingRef.current) return;
+      isUpdatingRef.current = true;
+      const cachedRegister = localStorage.getItem(`${STORAGE_KEYS.POS_REGISTER}_${terminalId}`);
+      if (cachedRegister) {
+          try {
+              const parsed = JSON.parse(cachedRegister);
+              setRegister(parsed);
+              registerRef.current = parsed;
+          } catch (e) {}
+      }
+      const cachedRate = localStorage.getItem(STORAGE_KEYS.EXCHANGE_RATE);
+      if (cachedRate) {
+          const rate = parseFloat(cachedRate);
+          if (!isNaN(rate)) setExchangeRate(rate);
+      }
+      isUpdatingRef.current = false;
   }, [terminalId]);
 
   useEffect(() => {
-    setCurrentSession(authActiveSession);
+      setCurrentSession(authActiveSession);
   }, [authActiveSession]);
 
   useEffect(() => {
-    if (!user?.terminalId) return;
-    const unsubscribe = syncService.subscribeToRegisterRealtime(terminalId, (registerData) => {
-      if (registerData && registerData.isOpen) {
-        const session = {
-          id: `${terminalId}_${registerData.openTime}`,
-          terminalId: terminalId,
-          userId: user?.uid || 'unknown',
-          startTime: registerData.openTime,
-          initialAmountUsd: registerData.openAmountUsd || 0,
-          finalAmountUsd: 0,
-          status: 'open',
-          totalSales: registerData.txs?.length || 0,
-          exchangeRate: registerData.exchangeRate || exchangeRate,
-        };
-        setCurrentSession(session);
-        if (setActiveSession) setActiveSession(session);
-      } else {
-        setCurrentSession(null);
-        if (setActiveSession) setActiveSession(null);
-      }
-    });
-    return () => unsubscribe();
+      if (!user?.terminalId) return;
+      const unsubscribe = syncService.subscribeToRegisterRealtime(terminalId, (registerData) => {
+          if (registerData && registerData.isOpen) {
+              const session = {
+                  id: `${terminalId}_${registerData.openTime}`,
+                  terminalId: terminalId,
+                  userId: user?.uid || 'unknown',
+                  startTime: registerData.openTime,
+                  initialAmountUsd: registerData.openAmountUsd || 0,
+                  finalAmountUsd: 0,
+                  status: 'open',
+                  totalSales: registerData.txs?.length || 0,
+                  exchangeRate: registerData.exchangeRate || exchangeRate,
+              };
+              setCurrentSession(session);
+              if (setActiveSession) setActiveSession(session);
+          } else {
+              setCurrentSession(null);
+              if (setActiveSession) setActiveSession(null);
+          }
+      });
+      return () => unsubscribe();
   }, [user?.terminalId, terminalId, user?.uid, exchangeRate, setActiveSession]);
 
   useEffect(() => {
-    if (!user) return;
-    const unsubRegister = syncService.subscribeToRegisterRealtime(terminalId, (registerData) => {
-      setRegister(registerData);
-      registerRef.current = registerData;
-      saveRegisterToLocalStorage(registerData);
-    });
-    return () => unsubRegister();
+      if (!user) return;
+      const unsubRegister = syncService.subscribeToRegisterRealtime(terminalId, (registerData) => {
+          setRegister(registerData);
+          registerRef.current = registerData;
+          saveRegisterToLocalStorage(registerData);
+      });
+      return () => unsubRegister();
   }, [user, terminalId, saveRegisterToLocalStorage]);
 
   useEffect(() => {
@@ -186,12 +223,29 @@ export function usePOSState() {
 
     const unsubProducts = syncService.subscribeToProducts((data: Product[]) => {
       const currentRate = exchangeRate;
+      const rateCents = rateToCents(currentRate);
       const productsWithFixed = data.map(product => {
-        if (product.isPriceFixed) return product;
+        // ✅ Asegurar que los productos tengan campos en céntimos
+        const priceUsdCents = product.priceUsdCents || toCentsUsd(product.priceUsd || 0);
+        const priceBsCents = product.isPriceFixed 
+          ? (product.priceBsCents || toCentsBs(product.priceBs || 0))
+          : Math.round((priceUsdCents * rateCents) / 100);
+        
+        if (product.isPriceFixed) return {
+          ...product,
+          priceUsdCents: priceUsdCents,
+          priceBsCents: product.priceBsCents || priceBsCents,
+          costUsdCents: product.costUsdCents || toCentsUsd(product.costUsd || 0),
+          costBsCents: product.costBsCents || toCentsBs(product.costBs || 0),
+        };
         return {
           ...product,
-          priceBs: roundTo2(product.priceUsd * currentRate),
-          costBs: product.costUsd ? roundTo2(product.costUsd * currentRate) : undefined,
+          priceUsd: roundTo2(product.priceUsd || 0),
+          priceBs: roundTo2((product.priceUsd || 0) * currentRate),
+          priceUsdCents: priceUsdCents,
+          priceBsCents: priceBsCents,
+          costUsdCents: product.costUsdCents || toCentsUsd(product.costUsd || 0),
+          costBsCents: Math.round((product.costUsdCents || 0) * rateCents / 100),
         };
       });
       setProducts(productsWithFixed);
@@ -282,7 +336,6 @@ export function usePOSState() {
     };
   }, [user]);
 
-  // ✅ Sincronización de precios en tiempo real para el carrito
   useEffect(() => {
     if (!isHydrated || products.length === 0 || cart.length === 0) return;
 
@@ -293,14 +346,18 @@ export function usePOSState() {
         if (product) {
           const masterPriceUsd = product.priceUsd;
           const masterPriceBs = product.priceBs;
+          const masterPriceUsdCents = product.priceUsdCents || toCentsUsd(masterPriceUsd);
+          const masterPriceBsCents = product.priceBsCents || toCentsBs(masterPriceBs);
           
-          // Solo actualizamos si el precio maestro ha cambiado respecto al que tiene el item en el carrito
-          if (item.priceUsd !== masterPriceUsd || item.priceBs !== masterPriceBs) {
+          if (item.priceUsd !== masterPriceUsd || item.priceBs !== masterPriceBs ||
+              item.priceUsdCents !== masterPriceUsdCents || item.priceBsCents !== masterPriceBsCents) {
             hasChanges = true;
             return {
               ...item,
               priceUsd: masterPriceUsd,
-              priceBs: masterPriceBs
+              priceBs: masterPriceBs,
+              priceUsdCents: masterPriceUsdCents,
+              priceBsCents: masterPriceBsCents,
             };
           }
         }
@@ -309,16 +366,7 @@ export function usePOSState() {
 
       return hasChanges ? updatedCart : prevCart;
     });
-  }, [products, isHydrated]); // Se dispara cada vez que el catálogo de productos cambie
-
-  useEffect(() => {
-    if (products.length > 0 && !isUpdatingRef.current) {
-      const sampleProduct = products[0];
-      if (sampleProduct && sampleProduct.priceBs !== roundTo2(sampleProduct.priceUsd * exchangeRate)) {
-        recalcAllPricesWithNewRate(exchangeRate);
-      }
-    }
-  }, [exchangeRate, products.length]);
+  }, [products, isHydrated]);
 
   const refreshAllData = useCallback(async () => {
     const [newProducts, newClients, newTransactions, newAccounts] = await Promise.all([
@@ -352,16 +400,32 @@ export function usePOSState() {
   }, [terminalId, refreshAllData]);
 
   const addProduct = useCallback((p: Product) => {
+    // ✅ Asegurar campos en céntimos
+    const productWithCents = {
+      ...p,
+      priceUsdCents: p.priceUsdCents || toCentsUsd(p.priceUsd || 0),
+      priceBsCents: p.priceBsCents || toCentsBs(p.priceBs || 0),
+      costUsdCents: p.costUsdCents || toCentsUsd(p.costUsd || 0),
+      costBsCents: p.costBsCents || toCentsBs(p.costBs || 0),
+    };
     setProducts(prev => {
       if (prev.some(prod => prod.id === p.id)) return prev;
-      return [...prev, p];
+      return [...prev, productWithCents];
     });
-    return syncService.saveProduct(p);
+    return syncService.saveProduct(productWithCents);
   }, []);
 
   const updateProduct = useCallback(async (p: Product) => {
-    setProducts(prev => prev.map(prod => prod.id === p.id ? p : prod));
-    return syncService.saveProduct(p);
+    // ✅ Asegurar campos en céntimos
+    const productWithCents = {
+      ...p,
+      priceUsdCents: p.priceUsdCents || toCentsUsd(p.priceUsd || 0),
+      priceBsCents: p.priceBsCents || toCentsBs(p.priceBs || 0),
+      costUsdCents: p.costUsdCents || toCentsUsd(p.costUsd || 0),
+      costBsCents: p.costBsCents || toCentsBs(p.costBs || 0),
+    };
+    setProducts(prev => prev.map(prod => prod.id === p.id ? productWithCents : prod));
+    return syncService.saveProduct(productWithCents);
   }, []);
 
   const deleteProduct = useCallback((id: number) => {
@@ -369,10 +433,17 @@ export function usePOSState() {
     return syncService.deleteProduct(id);
   }, []);
 
-  const saveClient = useCallback((c: Client) => syncService.saveClient(c), []);
+  const saveClient = useCallback((c: Client) => {
+    // ✅ Asegurar deuda en céntimos
+    const clientWithCents = {
+      ...c,
+      debtCents: c.debtCents || (c.debt ? toCentsBs(c.debt) : 0),
+      debt: c.debt || 0, // Mantener compatibilidad
+    };
+    return syncService.saveClient(clientWithCents);
+  }, []);
+  
   const deleteClient = useCallback((id: number) => syncService.deleteClient(id), []);
-
-  const refreshProducts = useCallback(async () => products, [products]);
 
   const checkProductStock = useCallback((productId: number, quantity: number): boolean => {
     const product = products.find(p => p.id === productId);
@@ -397,9 +468,17 @@ export function usePOSState() {
         return prev.map(item => item.productId === productId ? { ...item, qty: item.qty + 1 } : item);
       }
       return [...prev, { 
-        productId: product.id, name: product.name, priceBs: product.priceBs,
-        priceUsd: product.priceUsd, qty: 1, category: product.category,
-        ivaType: product.ivaType || 'sin_iva', ivaPercentage: product.ivaPercentage || 0, isKit: product.isKit || false,
+        productId: product.id, 
+        name: product.name, 
+        priceBs: product.priceBs,
+        priceUsd: product.priceUsd,
+        priceBsCents: product.priceBsCents || toCentsBs(product.priceBs),
+        priceUsdCents: product.priceUsdCents || toCentsUsd(product.priceUsd),
+        qty: 1, 
+        category: product.category,
+        ivaType: product.ivaType || 'sin_iva', 
+        ivaPercentage: product.ivaPercentage || 0, 
+        isKit: product.isKit || false,
         unitMeasure: product.unitMeasure || ''
       }];
     });
@@ -424,7 +503,15 @@ export function usePOSState() {
   }, [products, checkProductStock]);
 
   const updateCartItemPrice = useCallback((productId: number, newPriceUsd: number, newPriceBs: number) => {
-    setCart(prevCart => prevCart.map(item => item.productId === productId ? { ...item, priceUsd: roundTo2(newPriceUsd), priceBs: roundTo2(newPriceBs) } : item));
+    setCart(prevCart => prevCart.map(item => 
+      item.productId === productId ? { 
+        ...item, 
+        priceUsd: roundTo2(newPriceUsd), 
+        priceBs: roundTo2(newPriceBs),
+        priceUsdCents: toCentsUsd(newPriceUsd),
+        priceBsCents: toCentsBs(newPriceBs),
+      } : item
+    ));
   }, []);
 
   const createCashSession = useCallback(async (initialAmountUsd: number): Promise<any> => {
@@ -489,9 +576,22 @@ export function usePOSState() {
   }, [terminalId, user?.uid, exchangeRate, setActiveSession]);
 
   const openCashRegister = useCallback(async (bsAmount: number, usdAmount: number, rate: number) => {
+    const bsCents = toCentsBs(bsAmount);
+    const usdCents = toCentsUsd(usdAmount);
+    const rateCents = rateToCents(rate);
+    
     const registerData: CashRegister = {
-      isOpen: true, openTime: getVenezuelaISOString(), openAmount: bsAmount + (usdAmount * rate),
-      openAmountBs: bsAmount, openAmountUsd: usdAmount, txs: [], exchangeRate: rate
+      isOpen: true, 
+      openTime: getVenezuelaISOString(), 
+      openAmount: bsAmount + (usdAmount * rate),
+      openAmountBs: bsAmount, 
+      openAmountUsd: usdAmount, 
+      openAmountCents: bsCents + Math.round((usdCents * rateCents) / 100),
+      openAmountBsCents: bsCents,
+      openAmountUsdCents: usdCents,
+      txs: [], 
+      exchangeRate: rate,
+      exchangeRateCents: rateCents,
     };
     await syncService.saveRegisterByTerminal(terminalId, registerData);
     setRegister(registerData);
@@ -502,7 +602,19 @@ export function usePOSState() {
 
   const closeCashRegister = useCallback(() => {
     if (currentSession) closeCashSession(0).catch(console.error);
-    syncService.saveRegisterByTerminal(terminalId, { isOpen: false, openTime: null, openAmountBs: 0, openAmountUsd: 0, txs: [], exchangeRate: null });
+    syncService.saveRegisterByTerminal(terminalId, { 
+      isOpen: false, 
+      openTime: null, 
+      openAmount: 0,
+      openAmountBs: 0, 
+      openAmountUsd: 0,
+      openAmountCents: 0,
+      openAmountBsCents: 0,
+      openAmountUsdCents: 0,
+      txs: [], 
+      exchangeRate: null,
+      exchangeRateCents: null,
+    });
     setRegister(null);
     registerRef.current = null;
     saveRegisterToLocalStorage(null);
@@ -535,40 +647,89 @@ export function usePOSState() {
     if (!register?.isOpen) throw new Error('Caja no abierta');
 
     const isSpecial = type === 'colaboracion' || type === 'consumo_propio';
-    let subtotal = 0, iva = 0, total = 0, finalTotal = 0, costoTotalOperacion = 0;
+    let subtotalCents = 0, ivaCents = 0, totalCents = 0, finalTotalCents = 0;
+    let costoTotalOperacionCents = 0;
+    
+    const rateCents = rateToCents(exchangeRate);
     
     if (!isSpecial) {
-      subtotal = cart.reduce((acc, item) => acc + (item.priceBs * item.qty), 0);
-      iva = cart.reduce((total, item) => item.ivaType === 'con_iva' ? total + (item.priceBs * item.qty * 0.16) : total, 0);
-      total = subtotal + iva;
-      finalTotal = type === 'cobro_deuda' ? (paymentData.totalPaid || paymentData.amount) : total;
+      // ✅ Calcular en céntimos usando enteros
+      subtotalCents = cart.reduce((acc, item) => {
+        const priceCents = item.priceBsCents || toCentsBs(item.priceBs);
+        return acc + (priceCents * item.qty);
+      }, 0);
+      
+      ivaCents = cart.reduce((total, item) => {
+        if (item.ivaType === 'con_iva') {
+          const priceCents = item.priceBsCents || toCentsBs(item.priceBs);
+          return total + Math.round((priceCents * item.qty * 16) / 100);
+        }
+        return total;
+      }, 0);
+      
+      totalCents = subtotalCents + ivaCents;
+      finalTotalCents = type === 'cobro_deuda' ? toCentsBs(paymentData.totalPaid || paymentData.amount || 0) : totalCents;
     } else {
       for (const item of cart) {
         const p = products.find(p => p.id === item.productId);
-        if (p?.costUsd) costoTotalOperacion += (item.qty * p.costUsd);
+        if (p?.costUsdCents) {
+          costoTotalOperacionCents += (p.costUsdCents * item.qty);
+        }
       }
-      costoTotalOperacion = roundTo2(costoTotalOperacion);
     }
 
+    // ✅ Convertir a decimal para compatibilidad
+    const subtotal = fromCentsBs(subtotalCents);
+    const iva = fromCentsBs(ivaCents);
+    const total = fromCentsBs(totalCents);
+    const finalTotal = fromCentsBs(finalTotalCents);
+    const costoTotalOperacion = fromCentsBs(costoTotalOperacionCents);
+
     let targetClientId: number | undefined = undefined;
-    if (type === 'credito' && paymentData.isNewClient) {
-      const nextClientId = getVenezuelaTimestamp();
-      const newClient: Client = { 
-        id: nextClientId, 
-        name: paymentData.clientName, 
-        cedula: paymentData.clientCedula, 
-        phone: paymentData.clientPhone || '', 
-        address: paymentData.clientAddress || '', 
-        debt: 0,
-      };
-      await syncService.saveClient(newClient);
-      targetClientId = nextClientId;
-      setClients(prev => [...prev, newClient]);
+    if (type === 'credito') {
+      const totalDebtCents = finalTotalCents;
+      if (paymentData.isNewClient) {
+        const nextClientId = getVenezuelaTimestamp();
+        const newClient: Client = { 
+          id: nextClientId, 
+          name: paymentData.clientName, 
+          cedula: paymentData.clientCedula, 
+          phone: paymentData.clientPhone || '', 
+          address: paymentData.clientAddress || '', 
+          debt: total,
+          debtCents: totalDebtCents,
+        };
+        await syncService.saveClient(newClient);
+        targetClientId = nextClientId;
+        setClients(prev => [...prev, newClient]);
+      } else if (paymentData.clientId) {
+        targetClientId = Number(paymentData.clientId);
+        const clientToUpdate = clients.find(c => c.id === targetClientId);
+        if (clientToUpdate) {
+          const currentDebtCents = clientToUpdate.debtCents || toCentsBs(clientToUpdate.debt || 0);
+          const newDebtCents = currentDebtCents + totalDebtCents;
+          const updatedClient = { 
+            ...clientToUpdate, 
+            debt: fromCentsBs(newDebtCents),
+            debtCents: newDebtCents,
+          };
+          await syncService.saveClient(updatedClient);
+          setClients(prev => prev.map(c => c.id === targetClientId ? updatedClient : c));
+        }
+      }
     } else if (paymentData.clientId) {
       targetClientId = Number(paymentData.clientId);
     }
 
     const txId = getVenezuelaTimestamp();
+    
+    // ✅ Convertir payments a céntimos
+    const paymentsInCents = paymentData.payments?.map((p: Payment) => ({
+      ...p,
+      amountCents: p.amountCents || toCentsBs(p.amount || 0),
+      usdAmountCents: p.usdAmountCents || toCentsUsd(p.usdAmount || 0),
+    })) || [];
+
     const tx: Transaction = {
       id: txId, 
       date: getVenezuelaISOString(), 
@@ -578,21 +739,29 @@ export function usePOSState() {
       iva: isSpecial ? 0 : iva, 
       total: isSpecial ? 0 : finalTotal,
       totalUsd: isSpecial ? costoTotalOperacion : roundTo2(finalTotal / exchangeRate),
-      payMethod: paymentData.method || 'efectivo_bs', 
+      subtotalCents: isSpecial ? 0 : (type === 'cobro_deuda' ? finalTotalCents : subtotalCents),
+      ivaCents: isSpecial ? 0 : ivaCents,
+      totalCents: isSpecial ? 0 : finalTotalCents,
+      totalUsdCents: isSpecial ? costoTotalOperacionCents : Math.round((finalTotalCents * 100) / rateCents),
+      payMethod: paymentData.method || (type === 'credito' ? 'credito' : 'efectivo_bs'), 
       paidBs: isSpecial ? 0 : (paymentData.totalPaid || paymentData.amount || finalTotal),
-      change: isSpecial ? 0 : (paymentData.change || 0), 
+      paidBsCents: isSpecial ? 0 : toCentsBs(paymentData.totalPaid || paymentData.amount || finalTotal),
+      change: isSpecial ? 0 : (paymentData.change || 0),
+      changeCents: isSpecial ? 0 : toCentsBs(paymentData.change || 0),
       clientId: targetClientId, 
-      clientName: paymentData.clientName || undefined,
-      exchangeRate, 
+      clientName: paymentData.clientName || clients.find(c => c.id === targetClientId)?.name || undefined,
+      exchangeRate,
+      exchangeRateCents: rateCents,
       receiptNumber: paymentData.receiptNumber || undefined,
       costoTotalOperacion: isSpecial ? costoTotalOperacion : undefined,
       notes: isSpecial ? paymentData.notes : undefined, 
       authorizedBy: isSpecial ? paymentData.authorizedBy : undefined,
       sessionId: currentSession?.id || undefined, 
       ajusteRedondeoBs: paymentData.ajusteRedondeoBs || 0,
-      terminalId: terminalNameId, // ✅ Guardar Nombre como TerminalId principal
+      ajusteRedondeoBsCents: paymentData.ajusteRedondeoBsCents || 0,
+      terminalId: terminalNameId,
+      payments: paymentsInCents,
     };
-    if (type === 'contado' && paymentData.payments) tx.payments = paymentData.payments;
 
     const stockUpdates: Map<number, { newStock: number }> = new Map();
     const kardexEntries: any[] = [];
@@ -619,30 +788,15 @@ export function usePOSState() {
           previousStock: product.stock,
           newStock,
           reference: isSpecial ? `[${type}] ${paymentData.notes || 'Sin motivo'}` : `Venta #${tx.id}`,
-          note: isSpecial ? paymentData.notes || 'Sin motivo' : `Venta #${tx.id}`,
+          note: isSpecial ? `[${type}] ${paymentData.notes || 'Sin motivo'}` : `Venta #${tx.id}`,
           costUsd: product.costUsd,
+          costUsdCents: product.costUsdCents || 0,
         });
       }
     }
 
     let accountingEntry: any = null;
-    if (isSpecial && costoTotalOperacion > 0) {
-      accountingEntry = {
-        id: getVenezuelaTimestamp(),
-        date: getVenezuelaISOString(),
-        type: 'egreso',
-        category: 'otros',
-        subcategory: type === 'colaboracion' ? 'Donaciones' : 'Consumo Interno',
-        concept: `Salida por ${type}`,
-        description: paymentData.notes || 'Sin motivo',
-        amount: roundTo2(costoTotalOperacion * exchangeRate),
-        totalUsd: costoTotalOperacion, // ✅ Añadido para precisión en divisas
-        exchangeRate: exchangeRate,
-        referenceId: tx.id,
-        referenceType: type,
-        createdAt: getVenezuelaISOString(),
-      };
-    } else if (type === 'contado' || type === 'cobro_deuda') { // ✅ CORREGIDO: Se excluye 'credito' de la contabilidad real
+    if (type === 'contado' || type === 'cobro_deuda') {
       accountingEntry = {
         id: getVenezuelaTimestamp() + 1,
         date: getVenezuelaISOString(),
@@ -651,7 +805,8 @@ export function usePOSState() {
         concept: type === 'cobro_deuda' ? 'Cobro de deuda' : 'Venta',
         description: `Cliente: ${tx.clientName || 'Cliente Final'} - Pago: ${tx.payMethod}`,
         amount: tx.total,
-        totalUsd: tx.totalUsd, // ✅ Añadido para precisión en divisas
+        amountCents: tx.totalCents || 0,
+        totalUsd: tx.totalUsd,
         exchangeRate: exchangeRate,
         referenceId: tx.id,
         referenceType: type,
@@ -664,122 +819,129 @@ export function usePOSState() {
     await syncService.runAtomicSale(terminalId, tx, { 
       products: stockUpdates, 
       kardexEntries,
-      accountingEntry: accountingEntry,
+      accountingEntry: accountingEntry, 
       registerUpdate: { txs: newTxs } 
     });
-
-    if (type === 'credito' && targetClientId) {
-      const newAcc: Account = {
-        id: getVenezuelaTimestamp(), 
-        txId: tx.id, 
-        date: tx.date, 
-        clientId: targetClientId,
-        clientName: paymentData.clientName || 'Cliente', 
-        clientCedula: paymentData.clientCedula || '',
-        products: cart.map(i => `${i.name} x${i.qty}`).join(', '),
-        amountBs: total, 
-        amountUsd: roundTo2(total / exchangeRate), 
-        paidAmount: 0, 
-        paidAmountUsd: 0,
-        status: 'pendiente', 
-        exchangeRate,
-      };
-      await syncService.saveAccount(newAcc);
-      
-      const c = clients.find(cl => cl.id === targetClientId);
-      if (c) {
-        const updatedClient = { ...c, debt: (c.debt || 0) + total };
-        await syncService.saveClient(updatedClient);
-      }
-    }
 
     if (type !== 'cobro_deuda') setCart([]);
     return tx;
   }, [cart, register, exchangeRate, clients, products, terminalId, terminalNameId, getItemsToDiscount, currentSession, user?.uid]);
+  
+  const payClientDebt = useCallback(async (clientId: number, totalPaidUsd: number, payments: Payment[]) => {
+    const registerData = registerRef.current;
+    if (!registerData?.isOpen) throw new Error('La caja no está abierta.');
 
-  const applyAbono = useCallback(async (clientId: number, amount: number, method: string = 'efectivo_bs') => {
-    if (!register?.isOpen) {
-      console.warn("Caja no abierta, no se puede registrar el pago");
-      return null;
-    }
     const client = clients.find(c => c.id === clientId);
-    if (!client) {
-      console.warn("Cliente no encontrado");
-      return null;
-    }
+    if (!client) throw new Error('Cliente no encontrado.');
 
-    let remaining = amount;
-    const paidAccountRefs: string[] = [];
-    const clientAccounts = accounts
-      .filter(a => Number(a.clientId) === Number(clientId) && a.status !== 'pagada')
-      .sort((a, b) => new Date(a.date).getTime() - new Date(a.date).getTime());
+    const rateCents = rateToCents(exchangeRate);
+    const totalPaidUsdCents = toCentsUsd(totalPaidUsd);
+    const totalPaidBsCents = Math.round((totalPaidUsdCents * rateCents) / 100);
+    const totalPaidBs = fromCentsBs(totalPaidBsCents);
 
-    for (const acc of clientAccounts) {
-      if (remaining <= 0) break;
-      const owed = acc.amountBs - (acc.paidAmount || 0);
-      const pay = Math.min(remaining, owed);
-      const newPaid = (acc.paidAmount || 0) + pay;
-      const newPaidUsd = (acc.paidAmountUsd || 0) + (pay / exchangeRate);
-      const newStatus: 'pagada' | 'parcial' = newPaid >= acc.amountBs ? 'pagada' : 'parcial';
-      const updatedAcc = { ...acc, paidAmount: newPaid, paidAmountUsd: newPaidUsd, status: newStatus };
-      await syncService.saveAccount(updatedAcc);
-      paidAccountRefs.push(String(acc.txId));
-      remaining -= pay;
-    }
-
-    const isLiquidacion = remaining === 0 && amount >= (client.debt || 0);
-    const note = `${isLiquidacion ? 'LIQUIDACIÓN DE DEUDA' : 'ABONO DE DEUDA'} - Ref Credits: [${paidAccountRefs.join(',')}]`;
+    // ✅ Convertir payments a céntimos
+    const paymentsInCents = payments.map((p: Payment) => ({
+      ...p,
+      amountCents: p.amountCents || toCentsBs(p.amount || 0),
+      usdAmountCents: p.usdAmountCents || toCentsUsd(p.usdAmount || 0),
+    }));
 
     const txId = getVenezuelaTimestamp();
-    const tx: Transaction = {
+    const newTransaction: Transaction = {
       id: txId,
       date: getVenezuelaISOString(),
       type: 'cobro_deuda',
       items: [],
-      subtotal: amount,
+      total: totalPaidBs,
+      totalUsd: totalPaidUsd,
+      subtotal: totalPaidBs,
+      subtotalCents: totalPaidBsCents,
       iva: 0,
-      total: amount,
-      totalUsd: roundTo2(amount / exchangeRate),
-      payMethod: method,
-      paidBs: amount,
+      ivaCents: 0,
+      totalCents: totalPaidBsCents,
+      totalUsdCents: totalPaidUsdCents,
+      payMethod: payments.length > 1 ? 'multi_pago' : (payments[0]?.method || 'pago_deuda'),
+      payments: paymentsInCents,
+      paidBs: totalPaidBs,
+      paidBsCents: totalPaidBsCents,
       change: 0,
-      clientId: Number(clientId),
+      changeCents: 0,
+      clientId: clientId,
       clientName: client.name,
-      exchangeRate,
-      sessionId: currentSession?.id || undefined,
-      notes: note,
-      terminalId: terminalNameId, // ✅ Guardar Nombre como TerminalId
+      exchangeRate: exchangeRate,
+      exchangeRateCents: rateCents,
+      sessionId: currentSession?.id,
+      terminalId: terminalNameId,
+      notes: `Abono a deuda de ${client.name}`,
     };
 
     const accountingEntry = {
-      id: getVenezuelaTimestamp() + 2,
+      id: txId + 1,
       date: getVenezuelaISOString(),
       type: 'ingreso',
       category: 'cobro_deuda',
-      concept: 'Cobro de deuda',
-      description: `Abono Cliente: ${client.name} - ${method}`,
-      amount: amount,
-      totalUsd: tx.totalUsd, // ✅ Añadido para precisión
+      concept: `Cobro a ${client.name}`,
+      description: `Pago recibido de ${client.name} por un total de $${totalPaidUsd.toFixed(2)}`,
+      amount: totalPaidBs,
+      amountCents: totalPaidBsCents,
+      totalUsd: totalPaidUsd,
       exchangeRate: exchangeRate,
-      referenceId: tx.id,
+      referenceId: txId,
       referenceType: 'cobro_deuda',
       createdAt: getVenezuelaISOString(),
     };
 
-    const newTxs = [...(register.txs || []), tx];
-    await syncService.runAtomicSale(terminalId, tx, {
+    const currentDebtCents = client.debtCents || toCentsBs(client.debt || 0);
+    const newDebtCents = Math.max(0, currentDebtCents - totalPaidBsCents);
+    const updatedClient = {
+      ...client,
+      debt: fromCentsBs(newDebtCents),
+      debtCents: newDebtCents,
+    };
+
+    const registerUpdate = {
+      txs: [...(registerData.txs || []), newTransaction],
+    };
+
+    await syncService.runAtomicSale(terminalId, newTransaction, {
       products: new Map(),
       kardexEntries: [],
       accountingEntry: accountingEntry,
-      registerUpdate: { txs: newTxs }
+      registerUpdate: registerUpdate,
     });
 
-    const newDebt = Math.max(0, (client.debt || 0) - amount);
-    const updatedClient = { ...client, debt: newDebt };
     await syncService.saveClient(updatedClient);
-    
-    return tx;
-  }, [register, clients, accounts, exchangeRate, terminalId, terminalNameId, currentSession]);
+
+    setClients(prev => prev.map(c => c.id === clientId ? updatedClient : c));
+    setTransactions(prev => [...prev, newTransaction]);
+
+    setRegister(prevRegister => {
+        if (!prevRegister?.isOpen) return prevRegister;
+        const updatedRegister = { 
+            ...prevRegister, 
+            txs: [...(prevRegister.txs || []), newTransaction] 
+        };
+        registerRef.current = updatedRegister;
+        saveRegisterToLocalStorage(updatedRegister);
+        return updatedRegister;
+    });
+
+    return newTransaction;
+  }, [clients, exchangeRate, currentSession?.id, terminalNameId, terminalId, saveRegisterToLocalStorage]);
+
+
+  const applyAbono = useCallback(async (clientId: number, amount: number, method: string = 'efectivo_bs') => {
+     const amountUsd = amount / exchangeRate;
+     const payments: Payment[] = [{ 
+       id: '1', 
+       method, 
+       amount, 
+       usdAmount: amountUsd,
+       amountCents: toCentsBs(amount),
+       usdAmountCents: toCentsUsd(amountUsd),
+     }];
+     return payClientDebt(clientId, amountUsd, payments);
+  }, [exchangeRate, payClientDebt]);
 
   const registerCashEgress = useCallback(async (
     amount: number,
@@ -790,9 +952,23 @@ export function usePOSState() {
   ) => {
     if (!register?.isOpen) throw new Error('Caja no abierta');
 
+    const rateCents = rateToCents(exchangeRate);
     const isUsd = payMethod === 'usd_efectivo' || payMethod === 'zelle';
-    const totalBs = isUsd ? (usdAmount || 0) * exchangeRate : amount;
-    const totalUsd = isUsd ? (usdAmount || 0) : amount / exchangeRate;
+    
+    let totalBsCents: number;
+    let totalUsdCents: number;
+    
+    if (isUsd) {
+      const usdCents = toCentsUsd(usdAmount || 0);
+      totalUsdCents = usdCents;
+      totalBsCents = Math.round((usdCents * rateCents) / 100);
+    } else {
+      totalBsCents = toCentsBs(amount);
+      totalUsdCents = Math.round((totalBsCents * 100) / rateCents);
+    }
+    
+    const totalBs = fromCentsBs(totalBsCents);
+    const totalUsd = fromCentsUsd(totalUsdCents);
 
     const tx: Transaction = {
       id: getVenezuelaTimestamp(),
@@ -802,21 +978,30 @@ export function usePOSState() {
       subtotal: totalBs,
       iva: 0,
       total: totalBs,
-      totalUsd: roundTo2(totalUsd),
+      totalUsd: totalUsd,
+      subtotalCents: totalBsCents,
+      ivaCents: 0,
+      totalCents: totalBsCents,
+      totalUsdCents: totalUsdCents,
       payMethod: payMethod,
       paidBs: totalBs,
+      paidBsCents: totalBsCents,
       change: 0,
+      changeCents: 0,
       clientId: undefined,
       clientName: 'DEVOLUCIÓN',
       exchangeRate,
+      exchangeRateCents: rateCents,
       notes: reason,
       sessionId: currentSession?.id || undefined,
-      terminalId: terminalNameId, // ✅ Guardar Nombre como TerminalId
+      terminalId: terminalNameId,
       payments: [{
         id: crypto.randomUUID(),
         method: payMethod,
         amount: isUsd ? (usdAmount || 0) : amount,
         usdAmount: isUsd ? (usdAmount || 0) : undefined,
+        amountCents: isUsd ? toCentsUsd(usdAmount || 0) : toCentsBs(amount),
+        usdAmountCents: isUsd ? toCentsUsd(usdAmount || 0) : undefined,
       }],
     };
 
@@ -828,10 +1013,11 @@ export function usePOSState() {
       concept: 'Devolución de venta',
       description: reason,
       amount: totalBs,
-      totalUsd: tx.totalUsd, // ✅ Añadido para precisión
+      amountCents: totalBsCents,
+      totalUsd: tx.totalUsd,
       exchangeRate: exchangeRate,
       referenceId: tx.id,
-      referenceType: 'return',
+      referenceType: 'devolucion',
       createdAt: getVenezuelaISOString(),
     };
 
@@ -868,8 +1054,8 @@ export function usePOSState() {
     exchangeRate, setExchangeRate: setExchangeRateProxy,
     cart, addToCart, removeFromCart, updateCartQty, updateCartItemPrice,
     isIvaEnabled, setIsIvaEnabled, currentPage, setCurrentPage,
-    finalizeSale, applyAbono, registerCashEgress,
-    isHydrated, globalIvaPercentage, adminCode, checkProductStock, refreshProducts,
+    finalizeSale, applyAbono, payClientDebt, registerCashEgress,
+    isHydrated, globalIvaPercentage, adminCode, checkProductStock, refreshProductsList,
     currentSession, setCurrentSession, reloadSession, createCashSession, closeCashSession,
     refreshAllData,
   };

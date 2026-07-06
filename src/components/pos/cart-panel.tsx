@@ -1,4 +1,3 @@
-
 "use client";
 
 import { CartItem } from '@/lib/types';
@@ -6,22 +5,22 @@ import { ShoppingCart, Trash2, Banknote, Receipt, Tag, PackageOpen, AlertTriangl
 import { cn } from '@/lib/utils';
 import { useState, useMemo } from 'react';
 import PriceTypeModal from './PriceTypeModal';
+import {
+  toCentsBs,
+  toCentsUsd,
+  fromCentsBs,
+  fromCentsUsd,
+  formatCentsBs,
+  formatCentsUsd,
+  formatBs,
+  formatUsd,
+} from '@/lib/currency-formatter';
 
-const formatBs = (amount: number): string => {
-  if (isNaN(amount)) return 'Bs. 0,00';
-  return 'Bs. ' + amount.toLocaleString('es-VE', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  });
-};
+// ✅ Función local de redondeo
+const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
 
-const formatUsd = (amount: number): string => {
-  if (isNaN(amount)) return 'USD $0,00';
-  return 'USD $' + amount.toLocaleString('es-VE', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  });
-};
+// ✅ Función auxiliar para convertir tasa a céntimos
+const rateToCents = (rate: number): number => Math.round(rate * 100);
 
 interface CartPanelProps {
   cart: CartItem[];
@@ -56,9 +55,11 @@ export default function CartPanel({
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
 
   const cartWithUpdatedPrices = useMemo(() => {
+    const rateCents = rateToCents(exchangeRate);
     return cart.map(item => ({
       ...item,
-      priceBs: item.priceUsd * exchangeRate
+      priceBs: roundTo2(item.priceUsd * exchangeRate),
+      priceBsCents: item.priceUsdCents ? Math.round((item.priceUsdCents * rateCents) / 100) : toCentsBs(item.priceUsd * exchangeRate),
     }));
   }, [cart, exchangeRate]);
 
@@ -106,7 +107,7 @@ export default function CartPanel({
 
   const handleQuantityChange = (productId: number, newQty: number) => {
     if (isNaN(newQty) || newQty <= 0) {
-      onUpdateQty(productId, -999); // Use a magic number to signify removal
+      onUpdateQty(productId, -999);
     } else {
       const currentItem = cartWithUpdatedPrices.find(item => item.productId === productId);
       if (currentItem) {
@@ -116,19 +117,31 @@ export default function CartPanel({
     }
   };
 
-  const subtotal = cartWithUpdatedPrices.reduce((s, i) => s + (i.priceBs * i.qty), 0);
+  // ✅ Cálculo en céntimos
+  const subtotalCents = cartWithUpdatedPrices.reduce((sum, i) => {
+    const priceCents = i.priceBsCents || toCentsBs(i.priceBs);
+    return sum + (priceCents * i.qty);
+  }, 0);
   
-  const ivaAmount = cartWithUpdatedPrices.reduce((total, item) => {
+  // ✅ IVA en céntimos
+  const ivaAmountCents = cartWithUpdatedPrices.reduce((total, item) => {
     const isTaxable = (item as any).ivaType === 'con_iva';
     if (isTaxable) {
-        return total + (item.priceBs * item.qty);
+      const priceCents = item.priceBsCents || toCentsBs(item.priceBs);
+      return total + (priceCents * item.qty);
     }
     return total;
-  }, 0) * 0.16;
-
-  const iva = isIvaEnabled ? ivaAmount : 0;
-  const total = subtotal + iva;
+  }, 0);
+  
+  const ivaCents = isIvaEnabled ? Math.round((ivaAmountCents * 16) / 100) : 0;
+  const totalCents = subtotalCents + ivaCents;
+  
+  // ✅ Convertir a decimal para mostrar
+  const subtotal = fromCentsBs(subtotalCents);
+  const iva = fromCentsBs(ivaCents);
+  const total = fromCentsBs(totalCents);
   const totalUsd = total > 0 ? total / exchangeRate : 0;
+  const totalUsdCents = total > 0 ? Math.round(totalUsd * 100) : 0;
   
   const formattedReceiptNumber = nextReceiptNumber.toString().padStart(8, '0');
   
@@ -180,7 +193,8 @@ export default function CartPanel({
                 const priceUsd = item.priceUsd;
                 const hasIva = (item as any).ivaType === 'con_iva';
                 const isKit = (item as any).isKit === true;
-                const itemSubtotal = item.priceBs * item.qty;
+                const itemSubtotalCents = (item.priceBsCents || toCentsBs(item.priceBs)) * item.qty;
+                const itemSubtotal = fromCentsBs(itemSubtotalCents);
                 const kitHasStock = isKitStockSufficient(item);
                 const kitStockWarning = isKit && !kitHasStock;
 
@@ -221,14 +235,14 @@ export default function CartPanel({
                           if (!isNaN(val) && val > 0) {
                             handleQuantityChange(item.productId, val);
                           } else if (e.target.value === '') {
-                            // Allow clearing the input, handle logic in onUpdateQty if needed
+                            // Allow clearing the input
                           } else {
-                            handleQuantityChange(item.productId, 1); // Reset to 1 if invalid
+                            handleQuantityChange(item.productId, 1);
                           }
                         }}
                         onBlur={(e) => {
                           if (e.target.value === '' || parseInt(e.target.value) === 0) {
-                            handleQuantityChange(item.productId, 1); // Reset to 1 if empty or 0
+                            handleQuantityChange(item.productId, 1);
                           }
                         }}
                         className="w-10 text-center text-sm font-black text-black bg-white rounded-md px-1 py-1 border-2 border-black focus:outline-none"
