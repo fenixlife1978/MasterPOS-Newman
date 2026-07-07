@@ -101,7 +101,7 @@ export default function Sidebar({ currentPage, onPageChange, userRole, onToggleC
         })}
         {currentPage === 'pos' && (
           <button
-            onClick={() => onPageChange('cuentas')}
+            onClick={onToggleClients}
             title={collapsed ? 'Ver Deudas' : undefined}
             className={cn(
               "w-full rounded-xl flex items-center gap-3.5 transition-all text-left group mt-4",

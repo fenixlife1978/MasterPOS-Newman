@@ -653,7 +653,6 @@ export function usePOSState() {
     const rateCents = rateToCents(exchangeRate);
     
     if (!isSpecial) {
-      // ✅ Calcular en céntimos usando enteros
       subtotalCents = cart.reduce((acc, item) => {
         const priceCents = item.priceBsCents || toCentsBs(item.priceBs);
         return acc + (priceCents * item.qty);
@@ -678,7 +677,6 @@ export function usePOSState() {
       }
     }
 
-    // ✅ Convertir a decimal para compatibilidad
     const subtotal = fromCentsBs(subtotalCents);
     const iva = fromCentsBs(ivaCents);
     const total = fromCentsBs(totalCents);
@@ -686,44 +684,55 @@ export function usePOSState() {
     const costoTotalOperacion = fromCentsBs(costoTotalOperacionCents);
 
     let targetClientId: number | undefined = undefined;
+    let clientName: string = 'Cliente Final';
+    let clientCedula: string = 'N/A';
+
     if (type === 'credito') {
-      const totalDebtCents = finalTotalCents;
-      if (paymentData.isNewClient) {
-        const nextClientId = getVenezuelaTimestamp();
-        const newClient: Client = { 
-          id: nextClientId, 
-          name: paymentData.clientName, 
-          cedula: paymentData.clientCedula, 
-          phone: paymentData.clientPhone || '', 
-          address: paymentData.clientAddress || '', 
-          debt: total,
-          debtCents: totalDebtCents,
-        };
-        await syncService.saveClient(newClient);
-        targetClientId = nextClientId;
-        setClients(prev => [...prev, newClient]);
-      } else if (paymentData.clientId) {
-        targetClientId = Number(paymentData.clientId);
-        const clientToUpdate = clients.find(c => c.id === targetClientId);
-        if (clientToUpdate) {
-          const currentDebtCents = clientToUpdate.debtCents || toCentsBs(clientToUpdate.debt || 0);
-          const newDebtCents = currentDebtCents + totalDebtCents;
-          const updatedClient = { 
-            ...clientToUpdate, 
-            debt: fromCentsBs(newDebtCents),
-            debtCents: newDebtCents,
-          };
-          await syncService.saveClient(updatedClient);
-          setClients(prev => prev.map(c => c.id === targetClientId ? updatedClient : c));
+        const totalDebtCents = finalTotalCents;
+        if (paymentData.isNewClient) {
+            const nextClientId = getVenezuelaTimestamp();
+            const newClient: Client = { 
+                id: nextClientId, 
+                name: paymentData.clientName, 
+                cedula: paymentData.clientCedula, 
+                phone: paymentData.clientPhone || '', 
+                address: paymentData.clientAddress || '', 
+                debt: total,
+                debtCents: totalDebtCents,
+            };
+            await syncService.saveClient(newClient);
+            targetClientId = nextClientId;
+            clientName = newClient.name;
+            clientCedula = newClient.cedula;
+            setClients(prev => [...prev, newClient]);
+        } else if (paymentData.clientId) {
+            targetClientId = Number(paymentData.clientId);
+            const clientToUpdate = clients.find(c => c.id === targetClientId);
+            if (clientToUpdate) {
+                const currentDebtCents = clientToUpdate.debtCents || toCentsBs(clientToUpdate.debt || 0);
+                const newDebtCents = currentDebtCents + totalDebtCents;
+                const updatedClient = { 
+                    ...clientToUpdate, 
+                    debt: fromCentsBs(newDebtCents),
+                    debtCents: newDebtCents,
+                };
+                await syncService.saveClient(updatedClient);
+                clientName = updatedClient.name;
+                clientCedula = updatedClient.cedula;
+                setClients(prev => prev.map(c => c.id === targetClientId ? updatedClient : c));
+            }
         }
-      }
     } else if (paymentData.clientId) {
-      targetClientId = Number(paymentData.clientId);
+        targetClientId = Number(paymentData.clientId);
+        const client = clients.find(c => c.id === targetClientId);
+        if (client) {
+            clientName = client.name;
+            clientCedula = client.cedula;
+        }
     }
 
     const txId = getVenezuelaTimestamp();
     
-    // ✅ Convertir payments a céntimos
     const paymentsInCents = paymentData.payments?.map((p: Payment) => ({
       ...p,
       amountCents: p.amountCents || toCentsBs(p.amount || 0),
@@ -812,6 +821,27 @@ export function usePOSState() {
         referenceType: type,
         createdAt: getVenezuelaISOString(),
       };
+    } else if (type === 'credito' && targetClientId) {
+        const newAccount: Account = {
+            id: tx.id,
+            txId: tx.id,
+            date: tx.date,
+            clientId: targetClientId,
+            clientName,
+            clientCedula,
+            products: tx.items.map(i => `${i.name} (x${i.qty})`).join(', '),
+            amountBs: tx.total,
+            amountUsd: tx.totalUsd,
+            amountBsCents: tx.totalCents,
+            amountUsdCents: tx.totalUsdCents,
+            paidAmount: 0,
+            paidAmountCents: 0,
+            status: 'pendiente',
+            exchangeRate: tx.exchangeRate,
+            exchangeRateCents: tx.exchangeRateCents,
+        };
+        await syncService.saveAccount(newAccount);
+        setAccounts(prev => [...prev, newAccount]);
     }
 
     const newTxs = [...(register.txs || []), tx];
